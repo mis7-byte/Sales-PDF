@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import re
 
+# Set page configuration as first Streamlit call
 st.set_page_config(page_title="Sales & Dispatch Analytics", layout="wide")
 
 # ---------------------------------------------------------
@@ -44,7 +44,6 @@ EXPECTED_COLUMNS = [
 ]
 
 def parse_size(size_val):
-    """Extracts Width and Length from string like 1500X6300 or 1500*6300"""
     if pd.isna(size_val):
         return None, None
     size_str = str(size_val).upper().replace(" ", "").replace("*", "X")
@@ -57,7 +56,6 @@ def parse_size(size_val):
     return None, None
 
 def clean_data(df):
-    """Standardizes columns, cleans numeric values, and adds derived metrics."""
     renamed_cols = {}
     for col in df.columns:
         clean_col = str(col).strip().upper()
@@ -116,60 +114,66 @@ def render_kpis_and_charts(df, title_prefix=""):
 
     st.subheader(f"📊 {title_prefix} KPI Overview")
     
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Unique POs", f"{df['PO_NO'].nunique():,}")
-    col2.metric("Unique DOs", f"{df['DO_NO'].nunique():,}")
-    col3.metric("Parties", f"{df['PARTY_NAME'].nunique():,}")
-    col4.metric("Brokers", f"{df['BROKER'].nunique():,}")
-    col5.metric("Sales Persons", f"{df['SELLER_NAME'].nunique():,}")
+    kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5 = st.columns(5)
+    kpi_col1.metric("Unique POs", f"{df['PO_NO'].nunique():,}")
+    kpi_col2.metric("Unique DOs", f"{df['DO_NO'].nunique():,}")
+    kpi_col3.metric("Parties", f"{df['PARTY_NAME'].nunique():,}")
+    kpi_col4.metric("Brokers", f"{df['BROKER'].nunique():,}")
+    kpi_col5.metric("Sales Persons", f"{df['SELLER_NAME'].nunique():,}")
 
-    col6, col7, col8, col9, col10 = st.columns(5)
-    col6.metric("Total PO Qty (MT)", f"{df['PO_QTY'].sum():,.2f}")
-    col7.metric("Dispatched Qty (MT)", f"{df['DISP_QTY'].sum():,.2f}")
-    col8.metric("Pending Qty (MT)", f"{df['PENDING_QTY'].sum():,.2f}")
-    col9.metric("Total Revenue (₹)", f"₹{df['TOTAL_REVENUE'].sum():,.2f}")
-    col10.metric("Sectors Served", f"{df['SECTOR'].nunique():,}")
+    kpi_col6, kpi_col7, kpi_col8, kpi_col9, kpi_col10 = st.columns(5)
+    kpi_col6.metric("Total PO Qty (MT)", f"{df['PO_QTY'].sum():,.2f}")
+    kpi_col7.metric("Dispatched Qty (MT)", f"{df['DISP_QTY'].sum():,.2f}")
+    kpi_col8.metric("Pending Qty (MT)", f"{df['PENDING_QTY'].sum():,.2f}")
+    kpi_col9.metric("Total Revenue (₹)", f"₹{df['TOTAL_REVENUE'].sum():,.2f}")
+    kpi_col10.metric("Sectors Served", f"{df['SECTOR'].nunique():,}")
 
     st.divider()
 
     st.subheader("📈 Visual Analytics & Insights")
 
-    c1, c2 = st.columns(2)
-    with c1:
+    chart_c1, chart_c2 = st.columns(2)
+    with chart_c1:
+        seller_summary = df.groupby('SELLER_NAME')[['PO_QTY', 'DISP_QTY', 'PENDING_QTY']].sum().reset_index()
         fig_seller = px.bar(
-            df.groupby('SELLER_NAME')[['PO_QTY', 'DISP_QTY', 'PENDING_QTY']].sum().reset_index(),
+            seller_summary,
             x='SELLER_NAME', y=['PO_QTY', 'DISP_QTY', 'PENDING_QTY'],
             barmode='group', title="Salesperson Performance (Ordered vs Dispatched vs Pending)",
             labels={'value': 'Quantity (MT)', 'SELLER_NAME': 'Sales Person'}
         )
         st.plotly_chart(fig_seller, use_container_width=True)
 
-    with c2:
+    with chart_c2:
+        party_summary = df.groupby('PARTY_NAME')['PENDING_QTY'].sum().nlargest(10).reset_index()
         fig_party_pending = px.bar(
-            df.groupby('PARTY_NAME')['PENDING_QTY'].sum().nlargest(10).reset_index(),
+            party_summary,
             x='PENDING_QTY', y='PARTY_NAME', orientation='h',
             title="Top 10 Parties by Pending Quantity",
             labels={'PENDING_QTY': 'Pending Qty (MT)', 'PARTY_NAME': 'Party Name'}
         )
         st.plotly_chart(fig_party_pending, use_container_width=True)
 
-    c3, c4 = st.columns(2)
-    with c3:
+    chart_c3, chart_c4 = st.columns(2)
+    with chart_c3:
         fig_status = px.pie(
             df, names='STATUS', title="Order Status Distribution",
             hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel
         )
         st.plotly_chart(fig_status, use_container_width=True)
 
-    with c4:
-        fig_size = px.scatter(
-            df[df['WIDTH'].notnull() & df['LENGTH'].notnull()],
-            x='WIDTH', y='LENGTH', size='PO_QTY', color='SELLER_NAME',
-            hover_data=['PARTY_NAME', 'ITEM', 'GRADE'],
-            title="Size Analysis (Width vs Length vs Order Volume)",
-            labels={'WIDTH': 'Width (mm)', 'LENGTH': 'Length (mm)'}
-        )
-        st.plotly_chart(fig_size, use_container_width=True)
+    with chart_c4:
+        valid_sizes = df[df['WIDTH'].notnull() & df['LENGTH'].notnull()]
+        if not valid_sizes.empty:
+            fig_size = px.scatter(
+                valid_sizes,
+                x='WIDTH', y='LENGTH', size='PO_QTY', color='SELLER_NAME',
+                hover_data=['PARTY_NAME', 'ITEM', 'GRADE'],
+                title="Size Analysis (Width vs Length vs Order Volume)",
+                labels={'WIDTH': 'Width (mm)', 'LENGTH': 'Length (mm)'}
+            )
+            st.plotly_chart(fig_size, use_container_width=True)
+        else:
+            st.info("No valid Width/Length size data available for scatter plot.")
 
     st.subheader("📋 Detailed Data View")
     st.dataframe(df.drop(columns=['WIDTH', 'LENGTH'], errors='ignore'), use_container_width=True)
@@ -182,84 +186,94 @@ st.title("🏭 Sales, Dispatch & Order Tracking Analytics Dashboard")
 
 uploaded_file = st.sidebar.file_uploader("Upload Sales Excel Workbook", type=["xlsx", "xls"])
 
-if uploaded_file:
-    df_monthly, df_pending = load_excel_data(uploaded_file)
+if uploaded_file is not None:
+    try:
+        df_monthly, df_pending = load_excel_data(uploaded_file)
 
-    main_tabs = st.tabs(["📅 Date Analytics & Comparison", "📜 Party Ordering History", "⏳ PENDING DISPATCH Sheet"])
+        main_tabs = st.tabs(["📅 Date Analytics & Comparison", "📜 Party Ordering History", "⏳ PENDING DISPATCH Sheet"])
 
-    with main_tabs[0]:
-        st.sidebar.header("Date Filter Settings")
-        mode = st.sidebar.radio("Analysis Mode", ["Single Date Analysis", "Between Two Dates Comparison"])
+        with main_tabs[0]:
+            st.sidebar.header("Date Filter Settings")
+            mode = st.sidebar.radio("Analysis Mode", ["Single Date Analysis", "Between Two Dates Comparison"])
 
-        min_date = df_monthly['DISPATCH_DATE'].min()
-        max_date = df_monthly['DISPATCH_DATE'].max()
-
-        if pd.isna(min_date) or pd.isna(max_date):
-            st.warning("No valid dispatch dates found in the data.")
-        elif mode == "Single Date Analysis":
-            selected_date = st.sidebar.date_input("Select Dispatch Date", value=max_date, min_value=min_date, max_value=max_date)
-            filtered_df = df_monthly[df_monthly['DISPATCH_DATE'].dt.date == selected_date]
-            render_kpis_and_charts(filtered_df, title_prefix=f"Date: {selected_date}")
-
-        else:
-            col_d1, col_d2 = st.sidebar.columns(2)
-            date1 = col_d1.date_input("Start Date", value=min_date, min_value=min_date, max_value=max_date)
-            date2 = col_d2.date_input("End Date", value=max_date, min_value=min_date, max_value=max_date)
-
-            df_range = df_monthly[(df_monthly['DISPATCH_DATE'].dt.date >= date1) & (df_monthly['DISPATCH_DATE'].dt.date <= date2)]
+            valid_dates = df_monthly['DISPATCH_DATE'].dropna()
             
-            st.header(f"Range Analysis: {date1} to {date2}")
-            render_kpis_and_charts(df_range, title_prefix=f"Period ({date1} to {date2})")
+            if valid_dates.empty:
+                st.warning("No valid dispatch dates found in the uploaded monthly sheets.")
+            else:
+                min_date = valid_dates.min().date()
+                max_date = valid_dates.max().date()
 
-            st.divider()
-            st.subheader("🔄 Direct Day-vs-Day Comparison")
+                if mode == "Single Date Analysis":
+                    selected_date = st.sidebar.date_input("Select Dispatch Date", value=max_date, min_value=min_date, max_value=max_date)
+                    filtered_df = df_monthly[df_monthly['DISPATCH_DATE'].dt.date == selected_date]
+                    render_kpis_and_charts(filtered_df, title_prefix=f"Date: {selected_date}")
+
+                else:
+                    col_d1, col_d2 = st.sidebar.columns(2)
+                    date1 = col_d1.date_input("Start Date", value=min_date, min_value=min_date, max_value=max_date)
+                    date2 = col_d2.date_input("End Date", value=max_date, min_value=min_date, max_value=max_date)
+
+                    df_range = df_monthly[(df_monthly['DISPATCH_DATE'].dt.date >= date1) & (df_monthly['DISPATCH_DATE'].dt.date <= date2)]
+                    
+                    st.header(f"Range Analysis: {date1} to {date2}")
+                    render_kpis_and_charts(df_range, title_prefix=f"Period ({date1} to {date2})")
+
+                    st.divider()
+                    st.subheader("🔄 Direct Day-vs-Day Comparison")
+                    
+                    df_d1 = df_monthly[df_monthly['DISPATCH_DATE'].dt.date == date1]
+                    df_d2 = df_monthly[df_monthly['DISPATCH_DATE'].dt.date == date2]
+
+                    comp_col1, comp_col2 = st.columns(2)
+                    with comp_col1:
+                        st.markdown(f"### 📅 Baseline: {date1}")
+                        st.metric("Total Dispatch Qty", f"{df_d1['DISP_QTY'].sum():,.2f} MT")
+                        st.metric("Total Revenue", f"₹{df_d1['TOTAL_REVENUE'].sum():,.2f}")
+                        st.metric("Active Parties", df_d1['PARTY_NAME'].nunique())
+                    
+                    with comp_col2:
+                        diff_qty = df_d2['DISP_QTY'].sum() - df_d1['DISP_QTY'].sum()
+                        diff_rev = df_d2['TOTAL_REVENUE'].sum() - df_d1['TOTAL_REVENUE'].sum()
+                        
+                        st.markdown(f"### 📅 Target: {date2}")
+                        st.metric("Total Dispatch Qty", f"{df_d2['DISP_QTY'].sum():,.2f} MT", delta=f"{diff_qty:,.2f} MT")
+                        st.metric("Total Revenue", f"₹{df_d2['TOTAL_REVENUE'].sum():,.2f}", delta=f"₹{diff_rev:,.2f}")
+                        st.metric("Active Parties", df_d2['PARTY_NAME'].nunique(), delta=df_d2['PARTY_NAME'].nunique() - df_d1['PARTY_NAME'].nunique())
+
+        with main_tabs[1]:
+            st.header("🏢 Party Ordering Lifecycle & Recency Analytics")
             
-            df_d1 = df_monthly[df_monthly['DISPATCH_DATE'].dt.date == date1]
-            df_d2 = df_monthly[df_monthly['DISPATCH_DATE'].dt.date == date2]
+            if not df_monthly.empty:
+                party_summary = df_monthly.groupby('PARTY_NAME').agg(
+                    First_Order_Date=('PO_DATE', 'min'),
+                    Last_Order_Date=('PO_DATE', 'max'),
+                    Total_Orders=('PO_NO', 'nunique'),
+                    Total_PO_Qty=('PO_QTY', 'sum'),
+                    Total_Dispatched_Qty=('DISP_QTY', 'sum'),
+                    Total_Pending_Qty=('PENDING_QTY', 'sum'),
+                    Total_Spend=('TOTAL_REVENUE', 'sum')
+                ).reset_index().sort_values(by='Last_Order_Date', ascending=False)
 
-            comp_col1, comp_col2 = st.columns(2)
-            with comp_col1:
-                st.markdown(f"### 📅 Baseline: {date1}")
-                st.metric("Total Dispatch Qty", f"{df_d1['DISP_QTY'].sum():,.2f} MT")
-                st.metric("Total Revenue", f"₹{df_d1['TOTAL_REVENUE'].sum():,.2f}")
-                st.metric("Active Parties", df_d1['PARTY_NAME'].nunique())
-            
-            with comp_col2:
-                diff_qty = df_d2['DISP_QTY'].sum() - df_d1['DISP_QTY'].sum()
-                diff_rev = df_d2['TOTAL_REVENUE'].sum() - df_d1['TOTAL_REVENUE'].sum()
-                
-                st.markdown(f"### 📅 Target: {date2}")
-                st.metric("Total Dispatch Qty", f"{df_d2['DISP_QTY'].sum():,.2f} MT", delta=f"{diff_qty:,.2f} MT")
-                st.metric("Total Revenue", f"₹{df_d2['TOTAL_REVENUE'].sum():,.2f}", delta=f"₹{diff_rev:,.2f}")
-                st.metric("Active Parties", df_d2['PARTY_NAME'].nunique(), delta=df_d2['PARTY_NAME'].nunique() - df_d1['PARTY_NAME'].nunique())
+                st.dataframe(party_summary, use_container_width=True)
 
-    with main_tabs[1]:
-        st.header("🏢 Party Ordering Lifecycle & Recency Analytics")
-        
-        party_summary = df_monthly.groupby('PARTY_NAME').agg(
-            First_Order_Date=('PO_DATE', 'min'),
-            Last_Order_Date=('PO_DATE', 'max'),
-            Total_Orders=('PO_NO', 'nunique'),
-            Total_PO_Qty=('PO_QTY', 'sum'),
-            Total_Dispatched_Qty=('DISP_QTY', 'sum'),
-            Total_Pending_Qty=('PENDING_QTY', 'sum'),
-            Total_Spend=('TOTAL_REVENUE', 'sum')
-        ).reset_index().sort_values(by='Last_Order_Date', ascending=False)
+                selected_party = st.selectbox("Drill-down by Party Name", options=df_monthly['PARTY_NAME'].unique())
+                if selected_party:
+                    party_df = df_monthly[df_monthly['PARTY_NAME'] == selected_party]
+                    st.subheader(f"Order Details for {selected_party}")
+                    st.dataframe(party_df[['PO_NO', 'PO_DATE', 'SELLER_NAME', 'BROKER', 'ITEM', 'SIZE', 'PO_QTY', 'DISP_QTY', 'PENDING_QTY', 'STATUS']], use_container_width=True)
+            else:
+                st.info("No data available in monthly sheets.")
 
-        st.dataframe(party_summary, use_container_width=True)
+        with main_tabs[2]:
+            st.header("⏳ Dedicated Pending Dispatch Report")
+            if not df_pending.empty:
+                render_kpis_and_charts(df_pending, title_prefix="PENDING DISPATCH SHEET")
+            else:
+                st.info("No 'PENDING DISPATCH' sheet found in the uploaded file or the sheet contains no records.")
 
-        selected_party = st.selectbox("Drill-down by Party Name", options=df_monthly['PARTY_NAME'].unique())
-        if selected_party:
-            party_df = df_monthly[df_monthly['PARTY_NAME'] == selected_party]
-            st.subheader(f"Order Details for {selected_party}")
-            st.dataframe(party_df[['PO_NO', 'PO_DATE', 'SELLER_NAME', 'BROKER', 'ITEM', 'SIZE', 'PO_QTY', 'DISP_QTY', 'PENDING_QTY', 'STATUS']], use_container_width=True)
-
-    with main_tabs[2]:
-        st.header("⏳ Dedicated Pending Dispatch Report")
-        if not df_pending.empty:
-            render_kpis_and_charts(df_pending, title_prefix="PENDING DISPATCH SHEET")
-        else:
-            st.info("No 'PENDING DISPATCH' sheet found in the uploaded file or the sheet contains no records.")
+    except Exception as e:
+        st.error(f"An error occurred while processing the file: {str(e)}")
 
 else:
     st.info("👈 Upload an Excel workbook using the sidebar to generate reports.")
