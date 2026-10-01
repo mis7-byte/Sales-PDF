@@ -89,6 +89,11 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         if std_col not in df.columns:
             df[std_col] = np.nan
 
+    # Drop Excel Total/Summary Rows (e.g., rows containing 'total', 'grand total', or blank critical details)
+    if 'PARTY NAME' in df.columns:
+        is_total_row = df['PARTY NAME'].astype(str).str.lower().str.contains('total|sum', na=False)
+        df = df[~is_total_row].copy()
+
     if 'PO DATE' in df.columns:
         po_date_clean = df['PO DATE'].astype(str).str.replace('.', '/', regex=False)
         df['PO DATE'] = pd.to_datetime(po_date_clean, dayfirst=True, errors='coerce')
@@ -191,7 +196,7 @@ def make_bar_chart_bytes(df_data, x_col, y_cols, title, color='#2563EB'):
     return buf
 
 # ---------------------------------------------------------
-# Thread-Safe ReportLab PDF Generator
+# Dynamic & Flexible Thread-Safe PDF Generator
 # ---------------------------------------------------------
 def generate_exact_screen_pdf(sheet_name, kpis, chart_buffers, tables_dict):
     buffer = io.BytesIO()
@@ -219,28 +224,33 @@ def generate_exact_screen_pdf(sheet_name, kpis, chart_buffers, tables_dict):
         'HeaderCell', parent=styles['Normal'], fontSize=7.5, leading=9, textColor=colors.whitesmoke, fontName="Helvetica-Bold", alignment=0
     )
     
-    # Title
-    story.append(Paragraph(f"<b>📊 Sales & Dispatch Analytics — {sheet_name}</b>", title_style))
+    story.append(Paragraph(f"<b>📊 Sales & Dispatch Report — {sheet_name}</b>", title_style))
     story.append(Spacer(1, 6))
     
-    # 1. KPIs Section Card Layout
+    # 1. Flexible KPIs Section (Handles any KPI keys dynamically without KeyError)
     if kpis:
         story.append(Paragraph("<b>1. Key Performance Indicators (KPIs)</b>", section_style))
-        kpi_items = [
-            ("Overall PO Count", f"{kpis['Overall PO Count']:,}"),
-            ("Overall DO Count", f"{kpis['Overall DO Count']:,}"),
-            ("Number of Parties", f"{kpis['Number of Parties']:,}"),
-            ("Total PO Qty", f"{kpis['Total PO Quantity (MT)']:,.2f} MT"),
-            ("Total PO Amount", f"₹{kpis['Total PO Amount']:,.2f}"),
-            ("Dispatched Qty", f"{kpis['Dispatched Qty (MT)']:,.2f} MT"),
-            ("Cancelled Qty", f"{kpis['Cancelled Qty (MT)']:,.2f} MT"),
-            ("Pending Qty", f"{kpis['Pending Qty (MT)']:,.2f} MT")
-        ]
+        kpi_items = []
+        for k, v in kpis.items():
+            if isinstance(v, float):
+                val_str = f"{v:,.2f}"
+            elif isinstance(v, int):
+                val_str = f"{v:,}"
+            else:
+                val_str = str(v)
+            kpi_items.append((k, val_str))
         
         kpi_matrix = []
         for i in range(0, len(kpi_items), 4):
-            row_titles = [Paragraph(f"<b>{item[0]}</b>", cell_header) for item in kpi_items[i:i+4]]
-            row_vals = [Paragraph(f"<b>{item[1]}</b>", cell_style) for item in kpi_items[i:i+4]]
+            chunk = kpi_items[i:i+4]
+            row_titles = [Paragraph(f"<b>{item[0]}</b>", cell_header) for item in chunk]
+            row_vals = [Paragraph(f"<b>{item[1]}</b>", cell_style) for item in chunk]
+            
+            # Pad empty cells if last row has less than 4 KPIs
+            while len(row_titles) < 4:
+                row_titles.append(Paragraph("", cell_header))
+                row_vals.append(Paragraph("", cell_style))
+                
             kpi_matrix.append(row_titles)
             kpi_matrix.append(row_vals)
             
@@ -269,7 +279,7 @@ def generate_exact_screen_pdf(sheet_name, kpis, chart_buffers, tables_dict):
                     Spacer(1, 8)
                 ]))
 
-    # 3. Dynamic Tables with Auto Row-Wrap (Prevents Row Cutting)
+    # 3. Dynamic Tables with Auto Row-Wrap
     for title, df_table in tables_dict.items():
         if df_table is not None and not df_table.empty:
             story.append(Paragraph(f"<b>{title}</b>", section_style))
@@ -609,7 +619,6 @@ elif section == "📊 All Sales & Dispatch Analytics":
     st.markdown("---")
     st.subheader("📄 Download Dashboard PDF Report")
     
-    # Generate Matplotlib chart buffers for reliable PDF export
     chart_bufs = {
         "Overall Status Breakdown": make_pie_chart_bytes(
             ['Dispatched Qty', 'Cancelled Qty', 'Pending Qty'],
@@ -656,20 +665,23 @@ elif section == "🚚 Pending Dispatch":
     pd_sheet = st.sidebar.selectbox("Select Pending Dispatch Sheet", sheet_names, index=sheet_names.index(target_pd_sheet) if target_pd_sheet in sheet_names else 0)
     
     df_pd = load_and_clean_sheet(uploaded_file, pd_sheet)
-    active_pd = df_pd[(df_pd['ACTIVE_PENDING_QTY'] > 0) & (~df_pd['IS_CANCELLED'])]
+    
+    # Filter active pending orders (pending qty > 0 and not cancelled)
+    # Ensure invalid or total rows are excluded
+    active_pd = df_pd[(df_pd['ACTIVE_PENDING_QTY'] > 0) & (~df_pd['IS_CANCELLED']) & (df_pd['PARTY NAME'] != 'Unknown')].copy()
     
     pd_kpis = {
-        'Total Pending Orders': active_pd['PO NO'].replace('Unknown', np.nan).dropna().nunique(),
-        'Total Parties': active_pd['PARTY NAME'].replace('Unknown', np.nan).dropna().nunique(),
+        'Pending Orders': active_pd['PO NO'].replace('Unknown', np.nan).dropna().nunique(),
+        'Parties Impacted': active_pd['PARTY NAME'].replace('Unknown', np.nan).dropna().nunique(),
         'Total Pending Qty (MT)': active_pd['ACTIVE_PENDING_QTY'].sum(),
-        'Pending Amount (Est. ₹)': (active_pd['ACTIVE_PENDING_QTY'] * active_pd['PER TON']).sum()
+        'Est. Pending Value (₹)': (active_pd['ACTIVE_PENDING_QTY'] * active_pd['PER TON']).sum()
     }
     
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Pending Orders", f"{pd_kpis['Total Pending Orders']:,}")
-    c2.metric("Parties Impacted", f"{pd_kpis['Total Parties']:,}")
+    c1.metric("Pending Orders", f"{pd_kpis['Pending Orders']:,}")
+    c2.metric("Parties Impacted", f"{pd_kpis['Parties Impacted']:,}")
     c3.metric("Total Pending Qty", f"{pd_kpis['Total Pending Qty (MT)']:,.2f} MT")
-    c4.metric("Est. Pending Value", f"₹{pd_kpis['Pending Amount (Est. ₹)']:,.2f}")
+    c4.metric("Est. Pending Value", f"₹{pd_kpis['Est. Pending Value (₹)']:,.2f}")
     
     st.markdown("---")
     st.subheader("Pending Quantity Breakdown by Sales Person")
@@ -690,7 +702,7 @@ elif section == "🚚 Pending Dispatch":
     st.markdown("---")
     st.subheader("📋 Pending Dispatch Detailed Data Table")
     
-    pending_details_df = active_pd[['PO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']]
+    pending_details_df = active_pd[['PO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']].copy()
     pending_details_df.rename(columns={'ACTIVE_PENDING_QTY': 'PENDING QTY'}, inplace=True)
     st.dataframe(pending_details_df, use_container_width=True)
 
