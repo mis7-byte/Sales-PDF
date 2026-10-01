@@ -1,4 +1,3 @@
-%%writefile app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,7 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 import re
-from reportlab.lib.pagesizes import letter, A4
+from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
@@ -23,10 +22,10 @@ st.set_page_config(
 st.title("📊 Sales & Dispatch Analytics Dashboard")
 
 # ---------------------------------------------------------
-# Helper Functions: Flexible Excel Header & Column Normalization
+# Flexible Excel Header & Column Normalization
 # ---------------------------------------------------------
 EXPECTED_COLUMNS = {
-    'S_NO': ['s_no', 's.no', 'sr no', 'serial no', 'sno'],
+    'S_NO': ['s_no', 's.no', 'sr no', 'serial no', 'sno', 's_no.'],
     'PO NO': ['po no', 'po.no', 'po number', 'pono', 'po_no'],
     'DO NO': ['do .no.', 'do no', 'do.no', 'do_no', 'dono'],
     'PO DATE': ['po date', 'podate', 'po_date', 'order date'],
@@ -53,7 +52,7 @@ EXPECTED_COLUMNS = {
 }
 
 def load_and_clean_sheet(file_bytes, sheet_name):
-    # Try reading the first 10 rows to detect header position dynamically
+    # Detect header row index within first 10 rows
     df_raw = pd.read_excel(file_bytes, sheet_name=sheet_name, header=None)
     
     header_row_idx = 0
@@ -69,11 +68,11 @@ def load_and_clean_sheet(file_bytes, sheet_name):
             max_matches = matches
             header_row_idx = row_idx
             
-    # Read sheet starting from detected header
+    # Read sheet starting from detected header index
     df = pd.read_excel(file_bytes, sheet_name=sheet_name, header=header_row_idx)
     df.columns = [str(c).strip() for c in df.columns]
     
-    # Map headers to standard names
+    # Standardize column headers
     renamed_cols = {}
     for col in df.columns:
         col_lower = str(col).strip().lower()
@@ -88,36 +87,36 @@ def load_and_clean_sheet(file_bytes, sheet_name):
 
     df.rename(columns=renamed_cols, inplace=True)
     
-    # Ensure all expected columns exist (fill missing ones with NaN/0)
+    # Ensure all expected columns exist
     for std_col in EXPECTED_COLUMNS.keys():
         if std_col not in df.columns:
             df[std_col] = np.nan
 
-    # Clean & Convert Data Types
+    # Datetime conversions
     df['PO DATE'] = pd.to_datetime(df['PO DATE'], errors='coerce')
     df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
     
+    # Numeric sanitization
     numeric_cols = ['PO QTY (MT)', 'PER TON', 'DISP.QTY', 'PENDING']
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         
     df['AMOUNT'] = df['PO QTY (MT)'] * df['PER TON']
     
-    # Extract Width from Size (e.g., 1500X6300 -> 1500)
+    # Extract Width from Size string (e.g., 1500X6300 -> 1500)
     def parse_width(size_val):
         if pd.isna(size_val):
             return "N/A"
         match = re.search(r'(\d+)\s*[xX*]\s*(\d+)', str(size_val))
         if match:
             return match.group(1)
-        # fallback if single number
         num = re.findall(r'\d+', str(size_val))
         return num[0] if num else str(size_val)
 
     df['WIDTH'] = df['SIZE'].apply(parse_width)
     
-    # String hygiene
-    str_cols = ['PARTY NAME', 'SELLER NAME', 'ITEM', 'STATUS', 'REMARK', 'BROKER', 'SECTOR', 'PLACE']
+    # String conversions & null handling
+    str_cols = ['PARTY NAME', 'SELLER NAME', 'ITEM', 'STATUS', 'REMARK', 'BROKER', 'SECTOR', 'PLACE', 'PO NO', 'DO NO']
     for c in str_cols:
         df[c] = df[c].fillna('Unknown').astype(str).str.strip()
 
@@ -136,15 +135,12 @@ def generate_pdf_report(month_name, kpis, tables_dict):
         'DocTitle', parent=styles['Heading1'], fontSize=18, textColor=colors.HexColor('#1E3A8A'), spaceAfter=12
     )
     section_style = ParagraphStyle(
-        'DocSection', parent=styles['Heading2'], fontSize=13, textColor=colors.HexColor('#1E40AF'), spaceBefore=10, spaceAfter=6
+        'DocSection', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor('#1E40AF'), spaceBefore=10, spaceAfter=6
     )
-    normal_style = styles['Normal']
     
-    # Header Title
     story.append(Paragraph(f"<b>Sales & Dispatch Summary Report - {month_name}</b>", title_style))
     story.append(Spacer(1, 10))
     
-    # KPI Section
     story.append(Paragraph("Key Performance Indicators (KPIs)", section_style))
     kpi_data = [
         ["Metric", "Value"],
@@ -169,15 +165,11 @@ def generate_pdf_report(month_name, kpis, tables_dict):
     story.append(t_kpi)
     story.append(Spacer(1, 15))
     
-    # Append Tables
     for title, df in tables_dict.items():
         if df is not None and not df.empty:
             story.append(Paragraph(f"<b>{title}</b>", section_style))
-            # Format dataframe for table presentation (limit max 15 rows for neat PDF)
             sub_df = df.head(15).reset_index()
             table_data = [sub_df.columns.tolist()] + sub_df.values.tolist()
-            
-            # String conversion
             table_data = [[str(cell)[:25] for cell in row] for row in table_data]
             
             t_data = Table(table_data)
@@ -202,17 +194,14 @@ st.sidebar.title("📌 Navigation & Controls")
 uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx", "xls"])
 
 if uploaded_file is None:
-    st.info("👈 Please upload an Excel file from the left sidebar to begin.")
+    st.info("👈 Please upload an Excel workbook from the sidebar to view metrics.")
     st.stop()
 
-# Get available sheet names
 xl = pd.ExcelFile(uploaded_file)
 sheet_names = xl.sheet_names
 
-# Auto-detect sheets resembling months (e.g. SEPTEMBER 2026)
 selected_sheet = st.sidebar.selectbox("Select Month / Sheet", sheet_names)
 
-# Navigation sections
 section = st.sidebar.radio("Go to Section", [
     "📈 KPI Overview",
     "👤 Sales Person Analytics",
@@ -221,12 +210,8 @@ section = st.sidebar.radio("Go to Section", [
     "📐 Material & Width Breakdown"
 ])
 
-# Load Data
 df = load_and_clean_sheet(uploaded_file, selected_sheet)
 
-# ---------------------------------------------------------
-# Common KPI Computation Function
-# ---------------------------------------------------------
 def calculate_kpis(data):
     total_po = data['PO NO'].replace('Unknown', np.nan).dropna().nunique()
     total_do = data['DO NO'].replace('Unknown', np.nan).dropna().nunique()
@@ -276,11 +261,13 @@ if section == "📈 KPI Overview":
     )])
     st.plotly_chart(fig_kpi, use_container_width=True)
     
-    # Download PDF Section
     st.markdown("---")
-    st.subheader("📥 Download Section PDF")
+    st.subheader("📊 Data Table View")
+    st.dataframe(df, use_container_width=True)
     
-    # Prepare tables for PDF
+    st.markdown("---")
+    st.subheader("📄 Export Report")
+    
     sp_summary = df.groupby('SELLER NAME').agg(
         Ordered=('PO QTY (MT)', 'sum'),
         Dispatched=('DISP.QTY', 'sum'),
@@ -289,7 +276,7 @@ if section == "📈 KPI Overview":
     
     pdf_buffer = generate_pdf_report(selected_sheet, kpis, {"Sales Executive Performance": sp_summary})
     st.download_button(
-        label="📄 Download Complete PDF Summary Report",
+        label="📥 Download Complete PDF Summary Report",
         data=pdf_buffer,
         file_name=f"Sales_Report_{selected_sheet}.pdf",
         mime="application/pdf"
@@ -301,23 +288,19 @@ if section == "📈 KPI Overview":
 elif section == "👤 Sales Person Analytics":
     st.header("Sales Person Analytics")
     
-    # 1. Sales Person Wise ItemName Wise Ordered, Pending, Dispatched, Cancelled
-    st.subheader("1. Item-wise Breakdown per Sales Executive")
-    
     df['IS_CANCELLED'] = df['STATUS'].str.lower().str.contains('cancel') | df['REMARK'].str.lower().str.contains('cancel')
     df['CANCELLED_QTY'] = np.where(df['IS_CANCELLED'], df['PO QTY (MT)'], 0)
     
+    st.subheader("1. Item-wise Breakdown per Sales Executive")
     sp_item_grp = df.groupby(['SELLER NAME', 'ITEM']).agg(
         OrderedQty=('PO QTY (MT)', 'sum'),
         Dispatched=('DISP.QTY', 'sum'),
         Pending=('PENDING', 'sum'),
         CancelledQty=('CANCELLED_QTY', 'sum')
     ).reset_index()
-    
     st.dataframe(sp_item_grp, use_container_width=True)
     
     st.markdown("---")
-    
     col_a, col_b = st.columns(2)
     
     with col_a:
@@ -353,7 +336,6 @@ elif section == "👤 Sales Person Analytics":
 
     st.markdown("---")
     st.subheader("6. Short Closed Orders (Remarks containing 'SC')")
-    
     sc_df = df[df['REMARK'].str.lower().str.contains(r'\bsc\b|short close', na=False)]
     if not sc_df.empty:
         sc_summary = sc_df.groupby(['SELLER NAME', 'PARTY NAME', 'PO NO', 'REMARK']).agg(
@@ -364,15 +346,13 @@ elif section == "👤 Sales Person Analytics":
         st.info("No Short Closed ('SC') orders detected in Remarks for this sheet.")
 
 # =========================================================
-# SECTION 3: MONTH WISE & DATE FILTER (SINGLE DATE & DATE COMPARISON)
+# SECTION 3: MONTH WISE & DATE FILTER
 # =========================================================
 elif section == "📅 Month Wise & Date Filter":
     st.header(f"Date Analytics — {selected_sheet}")
     
     mode = st.radio("Select View Mode", ["Single Date Filter", "Compare Two Dates"])
-    
-    valid_dates = df['DATE'].dropna().dt.date.unique()
-    valid_dates = sorted(valid_dates)
+    valid_dates = sorted(df['DATE'].dropna().dt.date.unique())
     
     if not valid_dates:
         st.warning("No valid Dispatch Dates found in this sheet.")
@@ -380,7 +360,6 @@ elif section == "📅 Month Wise & Date Filter":
         
     if mode == "Single Date Filter":
         selected_date = st.selectbox("Select Date", valid_dates)
-        
         filtered_df = df[df['DATE'].dt.date == selected_date]
         st.subheader(f"Details for Date: {selected_date}")
         
@@ -440,9 +419,8 @@ elif section == "🏢 Party Wise Report":
         PendingQty=('PENDING', 'sum')
     ).reset_index()
     
-    st.subheader("Party Wise Ordered, Dispatched, and Pending Qty (with Sales Person Name)")
+    st.subheader("Party Wise Ordered, Dispatched, and Pending Qty (with Sales Person)")
     
-    # Filter by Party
     all_parties = ["All"] + sorted(party_grp['PARTY NAME'].unique().tolist())
     selected_party = st.selectbox("Filter by Party Name", all_parties)
     
@@ -465,7 +443,7 @@ elif section == "🏢 Party Wise Report":
 # =========================================================
 elif section == "📐 Material & Width Breakdown":
     st.header("Material & Width Breakdown")
-    st.info("💡 Note: Size is broken down strictly by **Width** (e.g. 1500 from 1500X6300), excluding length.")
+    st.info("💡 Size is parsed strictly on **Width** (e.g. 1500 extracted from 1500X6300).")
     
     df['IS_CANCELLED'] = df['STATUS'].str.lower().str.contains('cancel') | df['REMARK'].str.lower().str.contains('cancel')
     df['CANCELLED_QTY'] = np.where(df['IS_CANCELLED'], df['PO QTY (MT)'], 0)
