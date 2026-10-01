@@ -197,6 +197,36 @@ def make_bar_chart_bytes(df_data, x_col, y_cols, title, color='#2563EB'):
     buf.seek(0)
     return buf
 
+def make_comparison_bar_chart_bytes(label1, label2, kpi1, kpi2, title):
+    fig, ax = plt.subplots(figsize=(7, 3.5), dpi=200)
+    categories = ["Ordered Qty", "Dispatched Qty", "Cancelled Qty", "Pending Qty"]
+    y1 = [kpi1['Total PO Quantity (MT)'], kpi1['Dispatched Qty (MT)'], kpi1['Cancelled Qty (MT)'], kpi1['Pending Qty (MT)']]
+    y2 = [kpi2['Total PO Quantity (MT)'], kpi2['Dispatched Qty (MT)'], kpi2['Cancelled Qty (MT)'], kpi2['Pending Qty (MT)']]
+    
+    x = np.arange(len(categories))
+    width = 0.35
+    
+    rects1 = ax.bar(x - width/2, y1, width, label=str(label1), color='#2563EB')
+    rects2 = ax.bar(x + width/2, y2, width, label=str(label2), color='#10B981')
+    
+    ax.bar_label(rects1, fmt='%.1f', padding=2, fontsize=5)
+    ax.bar_label(rects2, fmt='%.1f', padding=2, fontsize=5)
+    
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories, fontsize=7)
+    ax.set_title(title, fontsize=10, fontweight='bold', color='#1E3A8A', pad=10)
+    ax.legend(fontsize=7, loc='upper right')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+    plt.tight_layout()
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
 # ---------------------------------------------------------
 # Dynamic PDF Generator
 # ---------------------------------------------------------
@@ -387,7 +417,6 @@ if section == "📅 Month Wise & Date Filter":
         c3.metric("Dispatched Qty", f"{d_kpis['Dispatched Qty (MT)']:,.2f} MT")
         c4.metric("Total Amount", f"₹{d_kpis['Total PO Amount']:,.2f}")
         
-        # Clean display table (hiding internal calculation columns)
         display_cols = [c for c in ['PO NO', 'DO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'THICKNESS', 'SIZE', 'PO QTY (MT)', 'PER TON', 'DISP.QTY', 'PENDING', 'STATUS', 'REMARK'] if c in filtered_df.columns]
         st.dataframe(filtered_df[display_cols], use_container_width=True)
 
@@ -477,6 +506,26 @@ if section == "📅 Month Wise & Date Filter":
         fig_comp.update_layout(barmode='group', title=f"Comparison: {label1} vs {label2}")
         st.plotly_chart(fig_comp, use_container_width=True)
 
+        st.markdown("---")
+        st.subheader("📥 Download Comparison PDF Report")
+        
+        comp_chart_buf = make_comparison_bar_chart_bytes(
+            label1, label2, kpi1, kpi2, f"Comparison: {label1} vs {label2}"
+        )
+        
+        comp_pdf_bytes = generate_exact_screen_pdf(
+            f"Comparison ({label1} vs {label2})",
+            {f"Summary": f"Comparing {label1} and {label2}"},
+            {"Comparison Chart": comp_chart_buf},
+            {"Comparison Metrics Table": comp_df}
+        )
+        st.download_button(
+            "📥 Download Comparison PDF Report",
+            data=comp_pdf_bytes,
+            file_name=f"Comparison_Report_{str(label1).replace('/', '-')}_vs_{str(label2).replace('/', '-')}.pdf",
+            mime="application/pdf"
+        )
+
 # =========================================================
 # SECTION 2: ALL SALES & DISPATCH ANALYTICS
 # =========================================================
@@ -486,7 +535,6 @@ elif section == "📊 All Sales & Dispatch Analytics":
     
     st.header(f"All Sales & Dispatch Analytics — {selected_sheet}")
     
-    # ---------------- 1. KPI OVERVIEW ----------------
     st.subheader("1. Key Performance Indicators (KPIs)")
     kpis = calculate_kpis(df)
     
@@ -515,9 +563,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
     
     st.markdown("---")
     
-    # ---------------- 2. SALES PERSON ANALYTICS ----------------
     st.subheader("2. Sales Executive Analytics")
-    
     sp_item_grp = df.groupby(['SELLER NAME', 'ITEM']).agg(
         OrderedQty=('PO QTY (MT)', 'sum'),
         Dispatched=('DISP.QTY', 'sum'),
@@ -582,9 +628,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
 
     st.markdown("---")
     
-    # ---------------- 3. PARTY WISE ANALYTICS ----------------
     st.subheader("3. Party Wise Analytics")
-    
     party_grp = df.groupby(['PARTY NAME', 'SELLER NAME']).agg(
         OrderedQty=('PO QTY (MT)', 'sum'),
         DispatchedQty=('DISP.QTY', 'sum'),
@@ -611,9 +655,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
 
     st.markdown("---")
     
-    # ---------------- 4. DETAILED MULTI-FILTER ITEM, THICKNESS & WIDTH TABLE ----------------
     st.subheader("4. Detailed Item, Thickness & Width Summary")
-    
     item_spec_grp = df.groupby(['ITEM', 'THICKNESS_MM', 'WIDTH_MM']).agg(
         OrderedQty=('PO QTY (MT)', 'sum'),
         DispatchedQty=('DISP.QTY', 'sum'),
@@ -631,7 +673,6 @@ elif section == "📊 All Sales & Dispatch Analytics":
         'PendingQty': 'Pending Qty (MT)'
     }, inplace=True)
 
-    # Multi-select filters
     col_f1, col_f2, col_f3 = st.columns(3)
     with col_f1:
         all_items_list = sorted(item_spec_grp['Item Name'].unique().tolist())
