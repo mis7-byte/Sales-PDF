@@ -5,6 +5,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 import re
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, KeepTogether, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 # ---------------------------------------------------------
 # Page Configuration
@@ -14,48 +18,6 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
-
-# Advanced CSS rules to ensure tables expand FULLY (no scrollbars) when printing to PDF
-st.markdown("""
-    <style>
-    @media print {
-        /* Hide sidebar, buttons, headers, and footers during print */
-        section[data-testid="stSidebar"], .stButton, header, footer, iframe {
-            display: none !important;
-        }
-        .main .block-container {
-            max-width: 100% !important;
-            padding: 0 !important;
-            margin: 0 !important;
-        }
-        body {
-            background-color: white !important;
-        }
-        
-        /* EXPAND DATAFRAMES & TABLES TO FULL HEIGHT FOR PDF PRINTING */
-        div[data-testid="stDataFrame"], 
-        div[data-testid="stTable"],
-        div[data-testid="element-container"],
-        .stDataFrame div {
-            height: auto !important;
-            max-height: none !important;
-            overflow: visible !important;
-        }
-        
-        /* Force scrollable table body containers to show all rows */
-        div[data-testid="stDataFrame"] > div > div {
-            max-height: none !important;
-            height: auto !important;
-            overflow: visible !important;
-        }
-        
-        /* Table page break protection */
-        tr, td, th {
-            page-break-inside: avoid !important;
-        }
-    }
-    </style>
-""", unsafe_allow_html=True)
 
 st.title("📊 Sales & Dispatch Analytics Dashboard")
 
@@ -126,7 +88,6 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         if std_col not in df.columns:
             df[std_col] = np.nan
 
-    # Datetime conversions (Day-first + dot replacement e.g. 01.09.2026 -> 01/09/2026)
     if 'PO DATE' in df.columns:
         po_date_clean = df['PO DATE'].astype(str).str.replace('.', '/', regex=False)
         df['PO DATE'] = pd.to_datetime(po_date_clean, dayfirst=True, errors='coerce')
@@ -147,12 +108,10 @@ def load_and_clean_sheet(file_bytes, sheet_name):
     for c in str_cols:
         df[c] = df[c].fillna('Unknown').astype(str).str.strip()
 
-    # Cancelled order identification
     df['IS_CANCELLED'] = df['STATUS'].str.lower().str.contains('cancel') | df['REMARK'].str.lower().str.contains('cancel')
     df['CANCELLED_QTY'] = np.where(df['IS_CANCELLED'], df['PO QTY (MT)'], 0.0)
     df['ACTIVE_PENDING_QTY'] = np.where(df['IS_CANCELLED'], 0.0, df['PENDING'])
 
-    # Parse Width from dimensions
     def parse_width(size_val):
         if pd.isna(size_val):
             return "N/A"
@@ -165,6 +124,117 @@ def load_and_clean_sheet(file_bytes, sheet_name):
     df['WIDTH'] = df['SIZE'].apply(parse_width)
 
     return df
+
+# ---------------------------------------------------------
+# Robust PDF Generator (Includes embedded charts and auto-wrapping tables)
+# ---------------------------------------------------------
+def generate_master_pdf(sheet_name, kpis, plotly_figs, tables_dict):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=25,
+        leftMargin=25,
+        topMargin=25,
+        bottomMargin=25
+    )
+    story = []
+    styles = getSampleStyleSheet()
+    
+    title_style = ParagraphStyle(
+        'DocTitle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#1E3A8A'), spaceAfter=8
+    )
+    section_style = ParagraphStyle(
+        'DocSection', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor('#1E40AF'), spaceBefore=12, spaceAfter=6
+    )
+    cell_style = ParagraphStyle(
+        'TableCell', parent=styles['Normal'], fontSize=7.5, leading=9, alignment=0
+    )
+    cell_header = ParagraphStyle(
+        'HeaderCell', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.whitesmoke, fontName="Helvetica-Bold", alignment=0
+    )
+    
+    # Title
+    story.append(Paragraph(f"<b>Sales & Dispatch Comprehensive Report — {sheet_name}</b>", title_style))
+    story.append(Spacer(1, 8))
+    
+    # 1. KPIs Section
+    if kpis:
+        story.append(Paragraph("1. Key Performance Indicators Summary", section_style))
+        kpi_data = [[Paragraph("<b>Metric</b>", cell_header), Paragraph("<b>Value</b>", cell_header)]]
+        for k, v in kpis.items():
+            if isinstance(v, (int, np.integer)):
+                val_str = f"{v:,}"
+            elif isinstance(v, (float, np.floating)):
+                val_str = f"₹{v:,.2f}" if "Amount" in k else f"{v:,.2f} MT"
+            else:
+                val_str = str(v)
+            kpi_data.append([Paragraph(k, cell_style), Paragraph(val_str, cell_style)])
+            
+        t_kpi = Table(kpi_data, colWidths=[270, 270])
+        t_kpi.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2563EB')),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('BOTTOMPADDING', (0,0), (-1,0), 5),
+            ('TOPPADDING', (0,0), (-1,0), 5),
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F3F4F6')]),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#D1D5DB')),
+        ]))
+        story.append(t_kpi)
+        story.append(Spacer(1, 12))
+
+    # 2. Convert and Embed Plotly Charts
+    for fig_title, fig in plotly_figs.items():
+        if fig is not None:
+            try:
+                img_bytes = fig.to_image(format="png", width=750, height=350, scale=2)
+                img_buffer = io.BytesIO(img_bytes)
+                story.append(KeepTogether([
+                    Paragraph(f"<b>{fig_title}</b>", section_style),
+                    Spacer(1, 4),
+                    Image(img_buffer, width=540, height=252),
+                    Spacer(1, 10)
+                ]))
+            except Exception:
+                pass # Fallback if kaleido engine is not available
+
+    # 3. Comprehensive Data Tables with Auto-Wrapping
+    for title, df_table in tables_dict.items():
+        if df_table is not None and not df_table.empty:
+            story.append(Paragraph(f"<b>{title}</b>", section_style))
+            
+            sub_df = df_table.copy().reset_index(drop=True)
+            cols = sub_df.columns.tolist()
+            
+            # Format numbers safely
+            for c in sub_df.select_dtypes(include=[np.number]).columns:
+                sub_df[c] = sub_df[c].apply(lambda x: f"{x:,.2f}" if pd.notnull(x) else "")
+
+            # Build Wrapped Table Data
+            table_data = [[Paragraph(f"<b>{col}</b>", cell_header) for col in cols]]
+            for row in sub_df.values.tolist():
+                table_data.append([Paragraph(str(cell), cell_style) for cell in row])
+            
+            available_width = 540
+            col_width = available_width / max(len(cols), 1)
+            
+            t_data = Table(table_data, colWidths=[col_width]*len(cols), repeatRows=1)
+            t_data.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1F2937')),
+                ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('TOPPADDING', (0,0), (-1,-1), 4),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F9FAFB')]),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
+            ]))
+            
+            story.append(t_data)
+            story.append(Spacer(1, 12))
+            
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 
 # ---------------------------------------------------------
 # Sidebar Controls & Navigation
@@ -319,16 +389,8 @@ elif section == "📊 All Sales & Dispatch Analytics":
     selected_sheet = st.sidebar.selectbox("Select Month / Sheet", sheet_names)
     df = load_and_clean_sheet(uploaded_file, selected_sheet)
     
-    col_head, col_btn = st.columns([3, 1])
-    with col_head:
-        st.header(f"All Sales & Dispatch Analytics — {selected_sheet}")
-    with col_btn:
-        st.components.v1.html("""
-            <button onclick="window.parent.print()" style="background-color: #1E40AF; color: white; border: none; padding: 10px 16px; font-size: 14px; border-radius: 6px; cursor: pointer; margin-top: 10px; width: 100%;">
-                🖨️ Print Full Screen to PDF
-            </button>
-        """, height=50)
-
+    st.header(f"All Sales & Dispatch Analytics — {selected_sheet}")
+    
     # ---------------- 1. KPI OVERVIEW ----------------
     st.subheader("1. Key Performance Indicators (KPIs)")
     kpis = calculate_kpis(df)
@@ -354,7 +416,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
         texttemplate='%{label}<br>%{value:,.2f} MT (%{percent})',
         marker_colors=['#10B981', '#F59E0B', '#EF4444']
     )])
-    fig_kpi.update_layout(title="Overall Status Breakdown (with Data Labels)")
+    fig_kpi.update_layout(title="Overall Status Breakdown")
     st.plotly_chart(fig_kpi, use_container_width=True)
     
     st.markdown("---")
@@ -369,7 +431,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
         Pending=('ACTIVE_PENDING_QTY', 'sum')
     ).reset_index()
     st.write("**Sales Executive Item-Wise Breakdown**")
-    st.dataframe(sp_item_grp, use_container_width=True, height=len(sp_item_grp) * 38 + 40)
+    st.dataframe(sp_item_grp, use_container_width=True)
     
     col_a, col_b = st.columns(2)
     with col_a:
@@ -421,6 +483,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
         sc_summary = sc_df.groupby(['SELLER NAME', 'PARTY NAME', 'PO NO', 'REMARK']).agg(ShortClosedQty=('PENDING', 'sum')).reset_index()
         st.dataframe(sc_summary, use_container_width=True)
     else:
+        sc_summary = pd.DataFrame()
         st.info("No Short Closed ('SC') orders found.")
 
     st.markdown("---")
@@ -439,7 +502,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
     selected_party = st.selectbox("Filter by Party Name", all_parties)
     
     filtered_party_grp = party_grp if selected_party == "All" else party_grp[party_grp['PARTY NAME'] == selected_party]
-    st.dataframe(filtered_party_grp, use_container_width=True, height=min(len(filtered_party_grp) * 38 + 40, 1000))
+    st.dataframe(filtered_party_grp, use_container_width=True)
     
     fig_party = px.bar(
         filtered_party_grp.head(15), 
@@ -462,7 +525,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
         CancelledQty=('CANCELLED_QTY', 'sum'),
         PendingQty=('ACTIVE_PENDING_QTY', 'sum')
     ).reset_index()
-    st.dataframe(width_grp, use_container_width=True, height=len(width_grp) * 38 + 40)
+    st.dataframe(width_grp, use_container_width=True)
     
     fig_width = px.bar(
         width_grp, 
@@ -475,6 +538,33 @@ elif section == "📊 All Sales & Dispatch Analytics":
     )
     fig_width.update_traces(textposition='outside')
     st.plotly_chart(fig_width, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("📥 Export Complete High-Quality PDF Report")
+    
+    plotly_figs = {
+        "Overall Status Breakdown": fig_kpi,
+        "Dispatched Qty by Sales Person": fig_disp,
+        "Order Received Qty by Sales Person": fig_rec,
+        "Party-Wise Breakdown (Top 15)": fig_party,
+        "Qty Breakdown by Width and Item": fig_width
+    }
+    
+    tables_to_pdf = {
+        "Sales Executive Performance Breakdown": sp_item_grp,
+        "Cancelled Orders per Sales Person": sp_cancelled,
+        "Pending Orders per Sales Person": sp_pending,
+        "Party Wise Summary": party_grp,
+        "Material & Width Breakdown Summary": width_grp
+    }
+    
+    pdf_buf = generate_master_pdf(selected_sheet, kpis, plotly_figs, tables_to_pdf)
+    st.download_button(
+        "📄 Download Full PDF Report (With Embedded Charts & Complete Tables)", 
+        data=pdf_buf, 
+        file_name=f"Master_Analytics_{selected_sheet}.pdf", 
+        mime="application/pdf"
+    )
 
 # =========================================================
 # SECTION 3: PENDING DISPATCH
@@ -522,4 +612,20 @@ elif section == "🚚 Pending Dispatch":
     
     pending_details_df = active_pd[['PO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']]
     pending_details_df.rename(columns={'ACTIVE_PENDING_QTY': 'PENDING QTY'}, inplace=True)
-    st.dataframe(pending_details_df, use_container_width=True, height=len(pending_details_df) * 38 + 40)
+    st.dataframe(pending_details_df, use_container_width=True)
+
+    st.markdown("---")
+    st.subheader("📥 Export Pending Dispatch Report")
+    
+    pdf_buf = generate_master_pdf(
+        pd_sheet,
+        pd_kpis,
+        {"Pending Quantity Breakdown": fig_pd},
+        {"Pending Dispatch Details": pending_details_df}
+    )
+    st.download_button(
+        "📄 Download Pending Dispatch PDF",
+        data=pdf_buf,
+        file_name=f"Pending_Dispatch_{pd_sheet}.pdf",
+        mime="application/pdf"
+    )
