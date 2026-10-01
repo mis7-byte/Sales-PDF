@@ -5,10 +5,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 import re
-import asyncio
-import os
-import base64
-from pyppeteer import launch
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, KeepTogether
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
 # ---------------------------------------------------------
 # Page Configuration
@@ -18,6 +18,8 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
+
+st.title("📊 Sales & Dispatch Analytics Dashboard")
 
 # ---------------------------------------------------------
 # Flexible Excel Header & Column Normalization
@@ -124,123 +126,123 @@ def load_and_clean_sheet(file_bytes, sheet_name):
     return df
 
 # ---------------------------------------------------------
-# Pyppeteer Async PDF Engine (Streamlit Cloud Compatible)
+# Thread-Safe ReportLab PDF Generator
 # ---------------------------------------------------------
-async def html_to_pdf_pyppeteer(html_content):
-    launch_args = [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu'
-    ]
-    
-    # Auto-detect system Chromium binary on Linux/Streamlit Cloud vs Local
-    executable_path = None
-    if os.path.exists('/usr/bin/chromium'):
-        executable_path = '/usr/bin/chromium'
-    elif os.path.exists('/usr/bin/chromium-browser'):
-        executable_path = '/usr/bin/chromium-browser'
-
-    launch_kwargs = {
-        'headless': True,
-        'args': launch_args
-    }
-    if executable_path:
-        launch_kwargs['executablePath'] = executable_path
-
-    browser = await launch(**launch_kwargs)
-    page = await browser.newPage()
-    await page.setContent(html_content, waitUntil='networkidle0')
-    pdf_data = await page.pdf({
-        'format': 'A4',
-        'printBackground': True,
-        'margin': {'top': '25px', 'right': '25px', 'bottom': '25px', 'left': '25px'}
-    })
-    await browser.close()
-    return pdf_data
-
 def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <style>
-            body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 10px; color: #1F2937; background: #FFF; }}
-            h1 {{ color: #1E3A8A; border-bottom: 2px solid #2563EB; padding-bottom: 8px; font-size: 22px; margin-bottom: 15px; }}
-            h2 {{ color: #1E40AF; font-size: 16px; margin-top: 25px; margin-bottom: 10px; }}
-            
-            .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }}
-            .kpi-card {{ background: #F3F4F6; border-radius: 6px; padding: 10px; border-left: 4px solid #2563EB; }}
-            .kpi-title {{ font-size: 10px; color: #4B5563; font-weight: bold; text-transform: uppercase; }}
-            .kpi-value {{ font-size: 16px; color: #111827; font-weight: bold; margin-top: 4px; }}
-            
-            .chart-container {{ width: 100%; text-align: center; margin-bottom: 20px; page-break-inside: avoid; }}
-            .chart-img {{ max-width: 100%; height: auto; border-radius: 4px; border: 1px solid #E5E7EB; }}
-            
-            table {{ width: 100%; border-collapse: collapse; margin-top: 8px; margin-bottom: 20px; font-size: 10px; }}
-            th {{ background-color: #1F2937; color: white; text-align: left; padding: 6px 8px; font-weight: 600; }}
-            td {{ padding: 6px 8px; border-bottom: 1px solid #E5E7EB; }}
-            tr:nth-child(even) {{ background-color: #F9FAFB; }}
-            
-            /* Crucial: Prevent splitting rows in half across PDF pages */
-            tr, td, th {{ page-break-inside: avoid !important; }}
-        </style>
-    </head>
-    <body>
-        <h1>📊 Sales & Dispatch Analytics — {sheet_name}</h1>
-        
-        <h2>1. Key Performance Indicators (KPIs)</h2>
-        <div class="kpi-grid">
-            <div class="kpi-card"><div class="kpi-title">Overall PO Count</div><div class="kpi-value">{kpis['Overall PO Count']:,}</div></div>
-            <div class="kpi-card"><div class="kpi-title">Overall DO Count</div><div class="kpi-value">{kpis['Overall DO Count']:,}</div></div>
-            <div class="kpi-card"><div class="kpi-title">Number of Parties</div><div class="kpi-value">{kpis['Number of Parties']:,}</div></div>
-            <div class="kpi-card"><div class="kpi-title">Total PO Qty</div><div class="kpi-value">{kpis['Total PO Quantity (MT)']:,.2f} MT</div></div>
-            <div class="kpi-card"><div class="kpi-title">Total PO Amount</div><div class="kpi-value">₹{kpis['Total PO Amount']:,.2f}</div></div>
-            <div class="kpi-card"><div class="kpi-title">Dispatched Qty</div><div class="kpi-value">{kpis['Dispatched Qty (MT)']:,.2f} MT</div></div>
-            <div class="kpi-card"><div class="kpi-title">Cancelled Qty</div><div class="kpi-value">{kpis['Cancelled Qty (MT)']:,.2f} MT</div></div>
-            <div class="kpi-card"><div class="kpi-title">Pending Qty</div><div class="kpi-value">{kpis['Pending Qty (MT)']:,.2f} MT</div></div>
-        </div>
-    """
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=25,
+        leftMargin=25,
+        topMargin=25,
+        bottomMargin=25
+    )
+    story = []
+    styles = getSampleStyleSheet()
     
-    # Render Plotly Charts to Image
-    for title, fig in plotly_figs.items():
+    title_style = ParagraphStyle(
+        'DocTitle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#1E3A8A'), spaceAfter=8
+    )
+    section_style = ParagraphStyle(
+        'DocSection', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor('#1E40AF'), spaceBefore=14, spaceAfter=6
+    )
+    cell_style = ParagraphStyle(
+        'TableCell', parent=styles['Normal'], fontSize=7.5, leading=9, alignment=0
+    )
+    cell_header = ParagraphStyle(
+        'HeaderCell', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.whitesmoke, fontName="Helvetica-Bold", alignment=0
+    )
+    
+    # Title
+    story.append(Paragraph(f"<b>📊 Sales & Dispatch Analytics — {sheet_name}</b>", title_style))
+    story.append(Spacer(1, 8))
+    
+    # 1. KPIs Section Card Layout
+    if kpis:
+        story.append(Paragraph("<b>1. Key Performance Indicators (KPIs)</b>", section_style))
+        kpi_items = [
+            ("Overall PO Count", f"{kpis['Overall PO Count']:,}"),
+            ("Overall DO Count", f"{kpis['Overall DO Count']:,}"),
+            ("Number of Parties", f"{kpis['Number of Parties']:,}"),
+            ("Total PO Qty", f"{kpis['Total PO Quantity (MT)']:,.2f} MT"),
+            ("Total PO Amount", f"₹{kpis['Total PO Amount']:,.2f}"),
+            ("Dispatched Qty", f"{kpis['Dispatched Qty (MT)']:,.2f} MT"),
+            ("Cancelled Qty", f"{kpis['Cancelled Qty (MT)']:,.2f} MT"),
+            ("Pending Qty", f"{kpis['Pending Qty (MT)']:,.2f} MT")
+        ]
+        
+        kpi_matrix = []
+        for i in range(0, len(kpi_items), 4):
+            row_titles = [Paragraph(f"<b>{item[0]}</b>", cell_header) for item in kpi_items[i:i+4]]
+            row_vals = [Paragraph(f"<b>{item[1]}</b>", cell_style) for item in kpi_items[i:i+4]]
+            kpi_matrix.append(row_titles)
+            kpi_matrix.append(row_vals)
+            
+        t_kpi = Table(kpi_matrix, colWidths=[135]*4)
+        t_kpi.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2563EB')),
+            ('BACKGROUND', (0,2), (-1,2), colors.HexColor('#2563EB')),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+            ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+            ('TOPPADDING', (0,0), (-1,-1), 4),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#D1D5DB')),
+        ]))
+        story.append(t_kpi)
+        story.append(Spacer(1, 12))
+
+    # 2. Convert and Embed Plotly Charts
+    for fig_title, fig in plotly_figs.items():
         if fig is not None:
             try:
-                img_bytes = fig.to_image(format="png", width=850, height=380, scale=2)
-                b64_img = base64.b64encode(img_bytes).decode('utf-8')
-                html += f"""
-                <div class="chart-container">
-                    <h2 style="text-align: left;">{title}</h2>
-                    <img class="chart-img" src="data:image/png;base64,{b64_img}" />
-                </div>
-                """
+                img_bytes = fig.to_image(format="png", width=750, height=350, scale=2)
+                img_buffer = io.BytesIO(img_bytes)
+                story.append(KeepTogether([
+                    Paragraph(f"<b>{fig_title}</b>", section_style),
+                    Spacer(1, 4),
+                    Image(img_buffer, width=540, height=252),
+                    Spacer(1, 10)
+                ]))
             except Exception:
                 pass
 
-    # Render Clean Auto-Expanding Data Tables
+    # 3. Dynamic Tables with Auto Row-Wrap (Prevents Row Cutting)
     for title, df_table in tables_dict.items():
         if df_table is not None and not df_table.empty:
-            html += f"2. <h2>{title}</h2><table><thead><tr>"
-            for col in df_table.columns:
-                html += f"<th>{col}</th>"
-            html += "</tr></thead><tbody>"
+            story.append(Paragraph(f"<b>{title}</b>", section_style))
             
-            for _, row in df_table.iterrows():
-                html += "<tr>"
+            sub_df = df_table.copy().reset_index(drop=True)
+            cols = sub_df.columns.tolist()
+            
+            table_data = [[Paragraph(f"<b>{col}</b>", cell_header) for col in cols]]
+            for row in sub_df.values.tolist():
+                formatted_row = []
                 for val in row:
                     val_str = f"{val:,.2f}" if isinstance(val, (float, np.floating)) else str(val)
-                    html += f"<td>{val_str}</td>"
-                html += "</tr>"
-            html += "</tbody></table>"
+                    formatted_row.append(Paragraph(val_str, cell_style))
+                table_data.append(formatted_row)
             
-    html += "</body></html>"
-    
-    try:
-        return asyncio.run(html_to_pdf_pyppeteer(html))
-    except Exception as e:
-        st.error(f"Error generating PDF: {str(e)}")
-        return None
+            available_width = 540
+            col_width = available_width / max(len(cols), 1)
+            
+            t_data = Table(table_data, colWidths=[col_width]*len(cols), repeatRows=1)
+            t_data.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1F2937')),
+                ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('TOPPADDING', (0,0), (-1,-1), 4),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F9FAFB')]),
+                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
+            ]))
+            
+            story.append(t_data)
+            story.append(Spacer(1, 12))
+            
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 
 # ---------------------------------------------------------
 # Sidebar Controls & Navigation
@@ -545,7 +547,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
     st.plotly_chart(fig_width, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("📄 Download Dashboard Screen View PDF")
+    st.subheader("📄 Download Dashboard PDF Report")
     
     plotly_figs = {
         "Overall Status Breakdown": fig_kpi,
@@ -566,9 +568,9 @@ elif section == "📊 All Sales & Dispatch Analytics":
     pdf_bytes = generate_exact_screen_pdf(selected_sheet, kpis, plotly_figs, tables_to_pdf)
     if pdf_bytes:
         st.download_button(
-            "📥 Download Screen-Matching PDF Report", 
+            "📥 Download Complete PDF Report", 
             data=pdf_bytes, 
-            file_name=f"Exact_Dashboard_Report_{selected_sheet}.pdf", 
+            file_name=f"Dashboard_Report_{selected_sheet}.pdf", 
             mime="application/pdf"
         )
 
@@ -621,7 +623,7 @@ elif section == "🚚 Pending Dispatch":
     st.dataframe(pending_details_df, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("📥 Export Pending Dispatch Screen View PDF")
+    st.subheader("📥 Export Pending Dispatch PDF")
     
     pdf_bytes = generate_exact_screen_pdf(
         pd_sheet,
@@ -631,8 +633,8 @@ elif section == "🚚 Pending Dispatch":
     )
     if pdf_bytes:
         st.download_button(
-            "📥 Download Screen-Matching Pending Dispatch PDF",
+            "📥 Download Pending Dispatch PDF",
             data=pdf_bytes,
-            file_name=f"Exact_Pending_Dispatch_{pd_sheet}.pdf",
+            file_name=f"Pending_Dispatch_{pd_sheet}.pdf",
             mime="application/pdf"
         )
