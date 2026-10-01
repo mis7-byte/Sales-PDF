@@ -11,9 +11,9 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 
 # Set Streamlit Page Configuration
-st.set_page_config(page_title="Sales Month-Wise Analytics Dashboard", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Sales Analytics & PDF Exporter", layout="wide", initial_sidebar_state="expanded")
 
-st.title("📊 Monthly Sales & Insights Comparison Dashboard")
+st.title("📊 Monthly Sales Analytics & Dispatch Dashboard")
 
 # -----------------------------------------------------------------------------
 # HELPER FUNCTIONS & DATA CLEANING
@@ -55,7 +55,7 @@ def load_all_sheets(uploaded_file):
                 df = pd.read_excel(xl, sheet_name=sheet, skiprows=header_idx)
                 df.columns = [str(c).strip().upper() for c in df.columns]
                 
-                # Column mapping for consistency across historical sheets
+                # Column mapping for consistency
                 rename_map = {
                     'S. NO.': 'S_NO', 'SR NO': 'S_NO', 'SR NO ': 'S_NO',
                     'DO .NO.': 'DO NO', 'DO NO ': 'DO NO',
@@ -101,9 +101,9 @@ def process_dataframe(df, sheet_name):
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip().str.upper()
 
-    # Parse Width and Length from SIZE
+    # Parse Width and Length from SIZE column
     def parse_size(size_str):
-        if pd.isna(size_str):
+        if pd.isna(size_str) or str(size_str).strip() == "":
             return None, None
         match = re.search(r'(\d+)\s*[X\*x]\s*(\d+)', str(size_str))
         if match:
@@ -118,29 +118,34 @@ def process_dataframe(df, sheet_name):
     df["MONTH_SHEET"] = sheet_name
     return df
 
-# PDF Generation Function
-def generate_pdf_report(df_summary, title="Monthly Sales Report"):
+# PDF Generation Function matching active view table
+def generate_pdf_report(df_summary, title="Sales Data Report"):
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), rightMargin=20, leftMargin=20, topMargin=20, bottomMargin=20)
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), rightMargin=15, leftMargin=15, topMargin=20, bottomMargin=20)
     styles = getSampleStyleSheet()
     story = []
 
     story.append(Paragraph(f"<b>{title}</b>", styles['Title']))
-    story.append(Spacer(1, 15))
+    story.append(Spacer(1, 10))
 
-    # Keep relevant columns for PDF export
-    export_cols = [c for c in ["PO NO", "DO NO", "PARTY NAME", "SELLER NAME", "ITEM", "PO QTY (MT)", "PER TON", "DISP.QTY", "PENDING", "STATUS"] if c in df_summary.columns]
-    pdf_df = df_summary[export_cols].head(50)
+    # Determine best column set for printable PDF
+    cols_to_include = [c for c in ["PO NO", "DO NO", "PARTY NAME", "BROKER", "SELLER NAME", "ITEM", "SIZE", "PO QTY (MT)", "PER TON", "DISP.QTY", "PENDING", "STATUS"] if c in df_summary.columns]
+    pdf_df = df_summary[cols_to_include].copy()
+
+    # Format numeric values nicely
+    for c in ["PO QTY (MT)", "PER TON", "DISP.QTY", "PENDING"]:
+        if c in pdf_df.columns:
+            pdf_df[c] = pdf_df[c].apply(lambda x: f"{x:,.2f}" if isinstance(x, (int, float)) else str(x))
 
     data = [pdf_df.columns.tolist()] + pdf_df.astype(str).values.tolist()
-    table = Table(data)
+    table = Table(data, repeatRows=1)
     table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f77b4')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 7),
-        ('BOTTOMPADDING', (0, 0), (-1, 0), 5),
+        ('FONTSIZE', (0, 0), (-1, -1), 6.5),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 4),
         ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f9f9f9')),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
     ]))
@@ -151,7 +156,7 @@ def generate_pdf_report(df_summary, title="Monthly Sales Report"):
     return buffer
 
 # -----------------------------------------------------------------------------
-# SIDEBAR CONTROLS (MONTH SELECTION)
+# SIDEBAR CONTROLS
 # -----------------------------------------------------------------------------
 st.sidebar.header("📁 Data Source & Month Selector")
 uploaded_file = st.sidebar.file_uploader("Upload Excel File (Sales Data.xlsx)", type=["xlsx", "xls"])
@@ -161,64 +166,86 @@ if uploaded_file is not None:
     available_months = list(monthly_data.keys())
 
     st.sidebar.markdown("---")
-    st.sidebar.header("🗓️ Select Month for Analysis")
-
-    # Primary Month Selection
+    st.sidebar.header("🗓️ Select Month")
     selected_month = st.sidebar.selectbox("Select Primary Month:", available_months, index=len(available_months)-1 if available_months else 0)
 
-    # Checkbox for Comparing Two Months
+    # Secondary Month Comparison
     chk_compare_months = st.sidebar.checkbox("Compare Between Two Months")
     compare_month = None
     if chk_compare_months:
         compare_options = [m for m in available_months if m != selected_month]
         compare_month = st.sidebar.selectbox("Select Second Month to Compare:", compare_options)
 
-    # Checkboxes for Additional Views
-    chk_overall_comp = st.sidebar.checkbox("Overall Period Analysis (All Months Combined)")
     chk_pending_dispatch = st.sidebar.checkbox("Show Pending Dispatch Section", value=True)
 
-    # Get Selected Data
-    if chk_overall_comp:
-        primary_df = pd.concat(monthly_data.values(), ignore_index=True) if monthly_data else pd.DataFrame()
-        st.info("Displaying Combined Overall Analytics Across All Available Months.")
-    else:
-        primary_df = monthly_data.get(selected_month, pd.DataFrame())
+    # Retrieve base sheet dataframe
+    raw_df = monthly_data.get(selected_month, pd.DataFrame())
+
+    # -----------------------------------------------------------------------------
+    # SIDEBAR SPECIFIC FILTERS (BROKER, STATUS, SIZE)
+    # -----------------------------------------------------------------------------
+    st.sidebar.markdown("---")
+    st.sidebar.header("🔍 Dynamic Data Filters")
+
+    filtered_df = raw_df.copy()
+
+    # 1. Order Status Filter
+    if "STATUS" in raw_df.columns:
+        status_list = ["ALL"] + sorted([s for s in raw_df["STATUS"].dropna().unique() if s != "NAN"])
+        selected_status = st.sidebar.selectbox("Filter by Order Status:", status_list)
+        if selected_status != "ALL":
+            filtered_df = filtered_df[filtered_df["STATUS"] == selected_status]
+
+    # 2. Broker / Direct Order Filter
+    if "BROKER" in raw_df.columns:
+        broker_options = ["ALL", "DIRECT ORDERS ONLY", "BROKER ORDERS ONLY"]
+        selected_broker_type = st.sidebar.selectbox("Filter Broker vs Direct:", broker_options)
+        if selected_broker_type == "DIRECT ORDERS ONLY":
+            filtered_df = filtered_df[filtered_df["BROKER"].isin(["DIRECT", "NONE", "NAN", "", "N/A"])]
+        elif selected_broker_type == "BROKER ORDERS ONLY":
+            filtered_df = filtered_df[~filtered_df["BROKER"].isin(["DIRECT", "NONE", "NAN", "", "N/A"])]
+
+    # 3. Width Filter
+    if "WIDTH" in raw_df.columns and raw_df["WIDTH"].notna().any():
+        valid_widths = sorted(raw_df["WIDTH"].dropna().unique())
+        width_opts = ["ALL"] + [str(w) for w in valid_widths]
+        selected_width = st.sidebar.selectbox("Filter by Width (mm):", width_opts)
+        if selected_width != "ALL":
+            filtered_df = filtered_df[filtered_df["WIDTH"] == float(selected_width)]
+
+    # 4. Length Filter
+    if "LENGTH" in raw_df.columns and raw_df["LENGTH"].notna().any():
+        valid_lengths = sorted(raw_df["LENGTH"].dropna().unique())
+        length_opts = ["ALL"] + [str(l) for l in valid_lengths]
+        selected_length = st.sidebar.selectbox("Filter by Length (mm):", length_opts)
+        if selected_length != "ALL":
+            filtered_df = filtered_df[filtered_df["LENGTH"] == float(selected_length)]
 
     # -----------------------------------------------------------------------------
     # KPI SECTION
     # -----------------------------------------------------------------------------
-    title_prefix = "All Months Combined" if chk_overall_comp else f"Month: {selected_month}"
-    st.markdown(f"## 📌 Key Performance Indicators (KPIs) - {title_prefix}")
+    st.markdown(f"## 📌 Key Metrics - {selected_month}")
 
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.metric("Total POs", primary_df["PO NO"].nunique() if "PO NO" in primary_df else 0)
-        st.metric("Total DOs", primary_df["DO NO"].nunique() if "DO NO" in primary_df else 0)
-    with col2:
-        st.metric("Parties", primary_df["PARTY NAME"].nunique() if "PARTY NAME" in primary_df else 0)
-        st.metric("Brokers", primary_df["BROKER"].nunique() if "BROKER" in primary_df else 0)
-    with col3:
-        st.metric("Sellers", primary_df["SELLER NAME"].nunique() if "SELLER NAME" in primary_df else 0)
-        st.metric("Sectors", primary_df["SECTOR"].nunique() if "SECTOR" in primary_df else 0)
-    with col4:
-        st.metric("Items", primary_df["ITEM"].nunique() if "ITEM" in primary_df else 0)
-        st.metric("Thicknesses", primary_df["THICKNESS"].nunique() if "THICKNESS" in primary_df else 0)
-    with col5:
-        st.metric("Grades", primary_df["GRADE"].nunique() if "GRADE" in primary_df else 0)
-        st.metric("Places", primary_df["PLACE"].nunique() if "PLACE" in primary_df else 0)
-
-    st.markdown("---")
-    
     kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    sum_po_qty = primary_df["PO QTY (MT)"].sum() if "PO QTY (MT)" in primary_df else 0
-    sum_disp_qty = primary_df["DISP.QTY"].sum() if "DISP.QTY" in primary_df else 0
-    sum_pending_qty = primary_df["PENDING"].sum() if "PENDING" in primary_df else 0
-    total_rev = primary_df["TOTAL REVENUE"].sum() if "TOTAL REVENUE" in primary_df else 0
+    sum_po_qty = filtered_df["PO QTY (MT)"].sum() if "PO QTY (MT)" in filtered_df else 0
+    sum_disp_qty = filtered_df["DISP.QTY"].sum() if "DISP.QTY" in filtered_df else 0
+    sum_pending_qty = filtered_df["PENDING"].sum() if "PENDING" in filtered_df else 0
+    total_rev = filtered_df["TOTAL REVENUE"].sum() if "TOTAL REVENUE" in filtered_df else 0
 
     kpi1.metric("Total Order Qty (MT)", f"{sum_po_qty:,.2f}")
     kpi2.metric("Dispatched Qty (MT)", f"{sum_disp_qty:,.2f}")
     kpi3.metric("Pending Qty (MT)", f"{sum_pending_qty:,.2f}")
     kpi4.metric("Total Revenue (₹)", f"₹{total_rev:,.2f}")
+
+    # Breakdown Metrics for Broker vs Direct
+    if "BROKER" in filtered_df.columns:
+        direct_mask = filtered_df["BROKER"].isin(["DIRECT", "NONE", "NAN", "", "N/A"])
+        direct_qty = filtered_df[direct_mask]["PO QTY (MT)"].sum() if "PO QTY (MT)" in filtered_df else 0
+        broker_qty = filtered_df[~direct_mask]["PO QTY (MT)"].sum() if "PO QTY (MT)" in filtered_df else 0
+
+        bc1, bc2 = st.columns(2)
+        bc1.info(f"🤝 **Broker Orders Qty:** {broker_qty:,.2f} MT")
+        bc2.success(f"🏢 **Direct Orders Qty:** {direct_qty:,.2f} MT")
 
     # -----------------------------------------------------------------------------
     # MONTH COMPARISON SECTION
@@ -239,100 +266,15 @@ if uploaded_file is not None:
         cc3.metric(f"Pending ({compare_month})", f"{c_pending_qty:,.2f}", delta=f"{sum_pending_qty - c_pending_qty:,.2f}")
         cc4.metric(f"Revenue ({compare_month})", f"₹{c_rev:,.2f}", delta=f"₹{total_rev - c_rev:,.2f}")
 
-        # Comparative Visualization
-        comp_summary = pd.DataFrame({
-            "Month": [selected_month, compare_month],
-            "PO Qty (MT)": [sum_po_qty, c_po_qty],
-            "Dispatched Qty (MT)": [sum_disp_qty, c_disp_qty],
-            "Pending Qty (MT)": [sum_pending_qty, c_pending_qty]
-        }).melt(id_vars="Month", var_name="Metric", value_name="Tons (MT)")
-
-        fig, ax = plt.subplots(figsize=(8, 3.5))
-        sns.barplot(data=comp_summary, x="Metric", y="Tons (MT)", hue="Month", ax=ax, palette="Set2")
-        ax.set_title("Volume Comparison Between Selected Months")
-        st.pyplot(fig)
-
     # -----------------------------------------------------------------------------
-    # DETAILED INSIGHTS & TABS
+    # DATA TABLE & PDF DOWNLOAD SECTION
     # -----------------------------------------------------------------------------
     st.markdown("---")
-    st.header("📈 Detailed Graphical Insights")
+    st.header(f"📋 Data View - {selected_month}")
+    st.dataframe(filtered_df, use_container_width=True)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "👤 Party Wise Summary", 
-        "👨‍💼 Salesperson Wise", 
-        "📐 Size Wise (Width x Length)", 
-        "🤝 Broker vs Direct", 
-        "📊 Order Status"
-    ])
-
-    with tab1:
-        st.subheader(f"Party Wise Summary ({selected_month})")
-        if not primary_df.empty and "PARTY NAME" in primary_df:
-            party_summary = primary_df.groupby("PARTY NAME").agg(
-                Total_Orders=("PO NO", "nunique"),
-                Total_PO_Qty=("PO QTY (MT)", "sum"),
-                Total_Dispatched=("DISP.QTY", "sum"),
-                Total_Pending=("PENDING", "sum")
-            ).reset_index().sort_values(by="Total_PO_Qty", ascending=False)
-
-            st.dataframe(party_summary, use_container_width=True)
-
-            fig, ax = plt.subplots(figsize=(10, 4))
-            sns.barplot(data=party_summary.head(10), x="Total_PO_Qty", y="PARTY NAME", ax=ax, palette="viridis")
-            ax.set_title(f"Top 10 Parties by Order Quantity - {selected_month}")
-            st.pyplot(fig)
-
-    with tab2:
-        st.subheader(f"Salesperson Wise Performance ({selected_month})")
-        if not primary_df.empty and "SELLER NAME" in primary_df:
-            seller_summary = primary_df.groupby(["SELLER NAME", "STATUS"]).agg(
-                PO_Qty=("PO QTY (MT)", "sum"),
-                Disp_Qty=("DISP.QTY", "sum"),
-                Pending_Qty=("PENDING", "sum")
-            ).reset_index()
-
-            st.dataframe(seller_summary, use_container_width=True)
-
-            fig, ax = plt.subplots(figsize=(10, 4))
-            sns.barplot(data=primary_df, x="SELLER NAME", y="PO QTY (MT)", hue="STATUS", estimator=sum, ci=None, ax=ax)
-            plt.xticks(rotation=45)
-            ax.set_title("Salesperson Volume by Order Status")
-            st.pyplot(fig)
-
-    with tab3:
-        st.subheader("Width & Length Distribution")
-        if "WIDTH" in primary_df and "LENGTH" in primary_df and not primary_df.empty:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            sns.scatterplot(data=primary_df, x="WIDTH", y="LENGTH", size="PO QTY (MT)", hue="ITEM", alpha=0.7, ax=ax)
-            ax.set_title("Material Dimensions Scatterplot (Width vs Length)")
-            st.pyplot(fig)
-
-    with tab4:
-        st.subheader("Broker vs Direct Orders")
-        if "BROKER" in primary_df and not primary_df.empty:
-            broker_summary = primary_df.groupby("BROKER")["PO QTY (MT)"].sum().reset_index()
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.pie(broker_summary["PO QTY (MT)"], labels=broker_summary["BROKER"], autopct='%1.1f%%', startangle=90)
-            ax.set_title("Direct vs Broker Order Quantity Share")
-            st.pyplot(fig)
-
-    with tab5:
-        st.subheader("Status Breakdown")
-        if "STATUS" in primary_df and not primary_df.empty:
-            status_counts = primary_df["STATUS"].value_counts().reset_index()
-            status_counts.columns = ["STATUS", "COUNT"]
-            st.dataframe(status_counts, use_container_width=True)
-
-    # -----------------------------------------------------------------------------
-    # EXCEL TABLE DATA & PDF DOWNLOAD
-    # -----------------------------------------------------------------------------
-    st.markdown("---")
-    st.header(f"📋 Data Table - {selected_month}")
-    st.dataframe(primary_df, use_container_width=True)
-
-    st.markdown("### 📥 Download PDF Summary")
-    pdf_buf = generate_pdf_report(primary_df, title=f"Sales Summary - {selected_month}")
+    st.markdown("### 📥 Download PDF Report")
+    pdf_buf = generate_pdf_report(filtered_df, title=f"Sales Report - {selected_month}")
     st.download_button(
         label=f"📄 Download PDF Report ({selected_month})",
         data=pdf_buf,
@@ -341,10 +283,10 @@ if uploaded_file is not None:
     )
 
     # -----------------------------------------------------------------------------
-    # PENDING DISPATCH SECTION (PLACED AT THE END)
+    # PENDING DISPATCH SECTION
     # -----------------------------------------------------------------------------
     if chk_pending_dispatch and not pending_df.empty:
-        st.markdown("<br><hr style='border:2px solid red;'><br>", unsafe_allow_clause=True)
+        st.markdown("<br><hr style='border:2px solid red;'><br>", unsafe_allow_html=True)
         st.header("🔴 PENDING DISPATCH REPORT & DASHBOARD")
 
         p_col1, p_col2, p_col3, p_col4 = st.columns(4)
@@ -353,18 +295,16 @@ if uploaded_file is not None:
         p_col3.metric("Total Revenue (₹)", f"₹{pending_df['TOTAL REVENUE'].sum():,.2f}")
         p_col4.metric("Affected Parties", pending_df["PARTY NAME"].nunique() if "PARTY NAME" in pending_df else 0)
 
-        p_tab1, p_tab2 = st.tabs(["📊 Pending Graphs", "📋 Pending Data Table"])
+        st.dataframe(pending_df, use_container_width=True)
 
-        with p_tab1:
-            if "PARTY NAME" in pending_df and "PENDING" in pending_df:
-                fig, ax = plt.subplots(figsize=(10, 4))
-                p_party = pending_df.groupby("PARTY NAME")["PENDING"].sum().nlargest(10).reset_index()
-                sns.barplot(data=p_party, x="PENDING", y="PARTY NAME", ax=ax, palette="Reds_r")
-                ax.set_title("Top 10 Parties with Highest Pending Dispatch Qty")
-                st.pyplot(fig)
-
-        with p_tab2:
-            st.dataframe(pending_df, use_container_width=True)
+        # PDF Download for Pending Section
+        pending_pdf_buf = generate_pdf_report(pending_df, title="Pending Dispatch Report")
+        st.download_button(
+            label="📄 Download Pending Dispatch PDF",
+            data=pending_pdf_buf,
+            file_name="Pending_Dispatch_Report.pdf",
+            mime="application/pdf"
+        )
 
 else:
-    st.info("👈 Please upload your `Sales Data.xlsx` workbook in the left sidebar to start.")
+    st.info("👈 Please upload your `Sales Data.xlsx` workbook in the left sidebar to get started.")
