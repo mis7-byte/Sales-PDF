@@ -52,7 +52,6 @@ EXPECTED_COLUMNS = {
 }
 
 def load_and_clean_sheet(file_bytes, sheet_name):
-    # Detect header row index within first 10 rows
     df_raw = pd.read_excel(file_bytes, sheet_name=sheet_name, header=None)
     
     header_row_idx = 0
@@ -68,11 +67,9 @@ def load_and_clean_sheet(file_bytes, sheet_name):
             max_matches = matches
             header_row_idx = row_idx
             
-    # Read sheet starting from detected header index
     df = pd.read_excel(file_bytes, sheet_name=sheet_name, header=header_row_idx)
     df.columns = [str(c).strip() for c in df.columns]
     
-    # Standardize column headers
     renamed_cols = {}
     for col in df.columns:
         col_lower = str(col).strip().lower()
@@ -87,23 +84,24 @@ def load_and_clean_sheet(file_bytes, sheet_name):
 
     df.rename(columns=renamed_cols, inplace=True)
     
-    # Ensure all expected columns exist
     for std_col in EXPECTED_COLUMNS.keys():
         if std_col not in df.columns:
             df[std_col] = np.nan
 
-    # Datetime conversions
+    # Datetime conversions (Primary focus on PO DATE)
     df['PO DATE'] = pd.to_datetime(df['PO DATE'], errors='coerce')
     df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
     
-    # Numeric sanitization
+    # Formatted strings for UI display (DD/MM/YYYY)
+    df['PO_DATE_STR'] = df['PO DATE'].dt.strftime('%d/%m/%Y').fillna('N/A')
+    df['PO_MONTH_YEAR'] = df['PO DATE'].dt.strftime('%m/%Y').fillna('N/A')
+    
     numeric_cols = ['PO QTY (MT)', 'PER TON', 'DISP.QTY', 'PENDING']
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         
     df['AMOUNT'] = df['PO QTY (MT)'] * df['PER TON']
     
-    # Extract Width from Size string (e.g., 1500X6300 -> 1500)
     def parse_width(size_val):
         if pd.isna(size_val):
             return "N/A"
@@ -115,7 +113,6 @@ def load_and_clean_sheet(file_bytes, sheet_name):
 
     df['WIDTH'] = df['SIZE'].apply(parse_width)
     
-    # String conversions & null handling
     str_cols = ['PARTY NAME', 'SELLER NAME', 'ITEM', 'STATUS', 'REMARK', 'BROKER', 'SECTOR', 'PLACE', 'PO NO', 'DO NO']
     for c in str_cols:
         df[c] = df[c].fillna('Unknown').astype(str).str.strip()
@@ -346,51 +343,86 @@ elif section == "👤 Sales Person Analytics":
         st.info("No Short Closed ('SC') orders detected in Remarks for this sheet.")
 
 # =========================================================
-# SECTION 3: MONTH WISE & DATE FILTER
+# SECTION 3: MONTH WISE & DATE FILTER (USING PO DATE)
 # =========================================================
 elif section == "📅 Month Wise & Date Filter":
-    st.header(f"Date Analytics — {selected_sheet}")
+    st.header("Date & Month Analytics (Based on PO Date)")
     
-    mode = st.radio("Select View Mode", ["Single Date Filter", "Compare Two Dates"])
-    valid_dates = sorted(df['DATE'].dropna().dt.date.unique())
+    mode = st.radio("Select View Mode", ["Single Date Filter", "Compare Month-Wise / Date-Wise"])
     
-    if not valid_dates:
-        st.warning("No valid Dispatch Dates found in this sheet.")
+    # Extract unique PO dates & formatted values
+    po_dates_df = df.dropna(subset=['PO DATE']).copy()
+    po_dates_df['PO_DATE_ONLY'] = po_dates_df['PO DATE'].dt.date
+    unique_dates = sorted(po_dates_df['PO_DATE_ONLY'].unique())
+    
+    if not unique_dates:
+        st.warning("No valid PO Dates found in this sheet.")
         st.stop()
-        
+
     if mode == "Single Date Filter":
-        selected_date = st.selectbox("Select Date", valid_dates)
-        filtered_df = df[df['DATE'].dt.date == selected_date]
-        st.subheader(f"Details for Date: {selected_date}")
+        # Format dates as DD/MM/YYYY for selection dropdown
+        date_options = [d.strftime('%d/%m/%Y') for d in unique_dates]
+        selected_date_str = st.selectbox("Select PO Date (DD/MM/YYYY)", date_options)
+        
+        selected_date = pd.to_datetime(selected_date_str, format='%d/%m/%Y').date()
+        filtered_df = df[df['PO DATE'].dt.date == selected_date]
+        
+        st.subheader(f"Details for PO Date: {selected_date_str}")
         
         d_kpis = calculate_kpis(filtered_df)
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("POs Active", d_kpis['total_po'])
-        c2.metric("Dispatched Qty", f"{d_kpis['dispatched_qty']:,.2f} MT")
-        c3.metric("Pending Qty", f"{d_kpis['pending_qty']:,.2f} MT")
+        c1.metric("POs Received", d_kpis['total_po'])
+        c2.metric("Total Ordered Qty", f"{d_kpis['total_po_qty']:,.2f} MT")
+        c3.metric("Dispatched Qty", f"{d_kpis['dispatched_qty']:,.2f} MT")
         c4.metric("Total Amount", f"₹{d_kpis['total_amount']:,.2f}")
         
         st.dataframe(filtered_df, use_container_width=True)
         
     else:
-        st.subheader("Compare Performance Between Two Dates")
-        col1, col2 = st.columns(2)
-        with col1:
-            date1 = st.selectbox("Select First Date", valid_dates, index=0)
-        with col2:
-            date2 = st.selectbox("Select Second Date", valid_dates, index=min(1, len(valid_dates)-1))
-            
-        df1 = df[df['DATE'].dt.date == date1]
-        df2 = df[df['DATE'].dt.date == date2]
+        st.subheader("Compare Metrics (Month-Wise or Date-Wise)")
+        comp_type = st.radio("Comparison Type", ["Date Wise", "Month Wise"], horizontal=True)
         
+        if comp_type == "Date Wise":
+            date_options = [d.strftime('%d/%m/%Y') for d in unique_dates]
+            col1, col2 = st.columns(2)
+            with col1:
+                date1_str = st.selectbox("Select First PO Date (DD/MM/YYYY)", date_options, index=0)
+            with col2:
+                date2_str = st.selectbox("Select Second PO Date (DD/MM/YYYY)", date_options, index=min(1, len(date_options)-1))
+                
+            d1 = pd.to_datetime(date1_str, format='%d/%m/%Y').date()
+            d2 = pd.to_datetime(date2_str, format='%d/%m/%Y').date()
+            
+            df1 = df[df['PO DATE'].dt.date == d1]
+            df2 = df[df['PO DATE'].dt.date == d2]
+            
+            label1 = date1_str
+            label2 = date2_str
+            
+        else: # Month Wise Comparison
+            # Gather all sheets or months available
+            col1, col2 = st.columns(2)
+            with col1:
+                sheet1 = st.selectbox("Select First Month Sheet", sheet_names, index=0, key="m1")
+            with col2:
+                sheet2 = st.selectbox("Select Second Month Sheet", sheet_names, index=min(1, len(sheet_names)-1), key="m2")
+                
+            df1 = load_and_clean_sheet(uploaded_file, sheet1)
+            df2 = load_and_clean_sheet(uploaded_file, sheet2)
+            
+            label1 = sheet1
+            label2 = sheet2
+            
         kpi1 = calculate_kpis(df1)
         kpi2 = calculate_kpis(df2)
         
         comp_df = pd.DataFrame({
-            "Metric": ["Dispatched Qty (MT)", "Pending Qty (MT)", "Total Amount (₹)", "Unique Parties"],
-            f"Date: {date1}": [kpi1['dispatched_qty'], kpi1['pending_qty'], kpi1['total_amount'], kpi1['num_parties']],
-            f"Date: {date2}": [kpi2['dispatched_qty'], kpi2['pending_qty'], kpi2['total_amount'], kpi2['num_parties']],
+            "Metric": ["Total PO Count", "Ordered Qty (MT)", "Dispatched Qty (MT)", "Pending Qty (MT)", "Total Amount (₹)", "Parties Count"],
+            f"{label1}": [kpi1['total_po'], kpi1['total_po_qty'], kpi1['dispatched_qty'], kpi1['pending_qty'], kpi1['total_amount'], kpi1['num_parties']],
+            f"{label2}": [kpi2['total_po'], kpi2['total_po_qty'], kpi2['dispatched_qty'], kpi2['pending_qty'], kpi2['total_amount'], kpi2['num_parties']],
             "Difference": [
+                kpi2['total_po'] - kpi1['total_po'],
+                kpi2['total_po_qty'] - kpi1['total_po_qty'],
                 kpi2['dispatched_qty'] - kpi1['dispatched_qty'],
                 kpi2['pending_qty'] - kpi1['pending_qty'],
                 kpi2['total_amount'] - kpi1['total_amount'],
@@ -401,10 +433,10 @@ elif section == "📅 Month Wise & Date Filter":
         st.table(comp_df)
         
         fig_comp = go.Figure(data=[
-            go.Bar(name=str(date1), x=["Dispatched Qty", "Pending Qty"], y=[kpi1['dispatched_qty'], kpi1['pending_qty']]),
-            go.Bar(name=str(date2), x=["Dispatched Qty", "Pending Qty"], y=[kpi2['dispatched_qty'], kpi2['pending_qty']])
+            go.Bar(name=str(label1), x=["Ordered Qty", "Dispatched Qty", "Pending Qty"], y=[kpi1['total_po_qty'], kpi1['dispatched_qty'], kpi1['pending_qty']]),
+            go.Bar(name=str(label2), x=["Ordered Qty", "Dispatched Qty", "Pending Qty"], y=[kpi2['total_po_qty'], kpi2['dispatched_qty'], kpi2['pending_qty']])
         ])
-        fig_comp.update_layout(barmode='group', title="Comparison of Quantities (MT)")
+        fig_comp.update_layout(barmode='group', title=f"Comparison: {label1} vs {label2}")
         st.plotly_chart(fig_comp, use_container_width=True)
 
 # =========================================================
