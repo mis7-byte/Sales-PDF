@@ -89,7 +89,7 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         if std_col not in df.columns:
             df[std_col] = np.nan
 
-    # Drop Excel Total/Summary Rows (e.g., rows containing 'total', 'grand total', or blank critical details)
+    # Drop summary/total rows
     if 'PARTY NAME' in df.columns:
         is_total_row = df['PARTY NAME'].astype(str).str.lower().str.contains('total|sum', na=False)
         df = df[~is_total_row].copy()
@@ -110,16 +110,19 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         
     df['AMOUNT'] = df['PO QTY (MT)'] * df['PER TON']
     
-    str_cols = ['PARTY NAME', 'SELLER NAME', 'ITEM', 'STATUS', 'REMARK', 'BROKER', 'SECTOR', 'PLACE', 'PO NO', 'DO NO']
+    str_cols = ['PARTY NAME', 'SELLER NAME', 'ITEM', 'STATUS', 'REMARK', 'BROKER', 'SECTOR', 'PLACE', 'PO NO', 'DO NO', 'THICKNESS']
     for c in str_cols:
-        df[c] = df[c].fillna('Unknown').astype(str).str.strip()
+        df[c] = df[c].fillna('N/A').astype(str).str.strip()
+
+    # Clean thickness column
+    df['THICKNESS_MM'] = df['THICKNESS'].astype(str).str.replace(r'(?i)\s*mm', '', regex=True).str.strip()
 
     df['IS_CANCELLED'] = df['STATUS'].str.lower().str.contains('cancel') | df['REMARK'].str.lower().str.contains('cancel')
     df['CANCELLED_QTY'] = np.where(df['IS_CANCELLED'], df['PO QTY (MT)'], 0.0)
     df['ACTIVE_PENDING_QTY'] = np.where(df['IS_CANCELLED'], 0.0, df['PENDING'])
 
     def parse_width(size_val):
-        if pd.isna(size_val):
+        if pd.isna(size_val) or str(size_val).strip() in ['', 'nan', 'N/A']:
             return "N/A"
         match = re.search(r'(\d+)\s*[xX*]\s*(\d+)', str(size_val))
         if match:
@@ -127,7 +130,7 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         num = re.findall(r'\d+', str(size_val))
         return num[0] if num else str(size_val)
 
-    df['WIDTH'] = df['SIZE'].apply(parse_width)
+    df['WIDTH_MM'] = df['SIZE'].apply(parse_width)
 
     return df
 
@@ -227,7 +230,7 @@ def generate_exact_screen_pdf(sheet_name, kpis, chart_buffers, tables_dict):
     story.append(Paragraph(f"<b>📊 Sales & Dispatch Report — {sheet_name}</b>", title_style))
     story.append(Spacer(1, 6))
     
-    # 1. Flexible KPIs Section (Handles any KPI keys dynamically without KeyError)
+    # 1. Flexible KPIs Section
     if kpis:
         story.append(Paragraph("<b>1. Key Performance Indicators (KPIs)</b>", section_style))
         kpi_items = []
@@ -246,7 +249,6 @@ def generate_exact_screen_pdf(sheet_name, kpis, chart_buffers, tables_dict):
             row_titles = [Paragraph(f"<b>{item[0]}</b>", cell_header) for item in chunk]
             row_vals = [Paragraph(f"<b>{item[1]}</b>", cell_style) for item in chunk]
             
-            # Pad empty cells if last row has less than 4 KPIs
             while len(row_titles) < 4:
                 row_titles.append(Paragraph("", cell_header))
                 row_vals.append(Paragraph("", cell_style))
@@ -594,27 +596,36 @@ elif section == "📊 All Sales & Dispatch Analytics":
 
     st.markdown("---")
     
-    # ---------------- 4. MATERIAL & WIDTH BREAKDOWN ----------------
-    st.subheader("4. Material & Width Breakdown")
-    width_grp = df.groupby(['ITEM', 'WIDTH']).agg(
+    # ---------------- 4. DETAILED ITEM, THICKNESS & WIDTH TABLE ----------------
+    st.subheader("4. Detailed Item, Thickness & Width Summary")
+    
+    item_spec_grp = df.groupby(['ITEM', 'THICKNESS_MM', 'WIDTH_MM']).agg(
         OrderedQty=('PO QTY (MT)', 'sum'),
         DispatchedQty=('DISP.QTY', 'sum'),
         CancelledQty=('CANCELLED_QTY', 'sum'),
         PendingQty=('ACTIVE_PENDING_QTY', 'sum')
     ).reset_index()
-    st.dataframe(width_grp, use_container_width=True)
     
-    fig_width = px.bar(
-        width_grp, 
-        x='WIDTH', 
-        y=['OrderedQty', 'DispatchedQty', 'CancelledQty', 'PendingQty'], 
-        color='ITEM',
-        title="Qty Breakdown by Width and Item",
-        barmode='group',
-        text_auto=',.1f'
-    )
-    fig_width.update_traces(textposition='outside')
-    st.plotly_chart(fig_width, use_container_width=True)
+    item_spec_grp.rename(columns={
+        'ITEM': 'Item Name',
+        'THICKNESS_MM': 'Thickness (mm)',
+        'WIDTH_MM': 'Width (mm)',
+        'OrderedQty': 'Ordered Qty (MT)',
+        'DispatchedQty': 'Dispatched Qty (MT)',
+        'CancelledQty': 'Cancelled Qty (MT)',
+        'PendingQty': 'Pending Qty (MT)'
+    }, inplace=True)
+
+    # Filter control for Item
+    items_list = ["All Items"] + sorted(item_spec_grp['Item Name'].unique().tolist())
+    selected_item_filter = st.selectbox("Filter Table by Item Name", items_list)
+
+    if selected_item_filter != "All Items":
+        display_spec_table = item_spec_grp[item_spec_grp['Item Name'] == selected_item_filter]
+    else:
+        display_spec_table = item_spec_grp
+
+    st.dataframe(display_spec_table, use_container_width=True)
 
     st.markdown("---")
     st.subheader("📄 Download Dashboard PDF Report")
@@ -641,7 +652,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
         "Cancelled Orders per Sales Person": sp_cancelled,
         "Pending Orders per Sales Person": sp_pending,
         "Party Wise Summary": party_grp,
-        "Material & Width Breakdown Summary": width_grp
+        "Detailed Item, Thickness & Width Summary": display_spec_table
     }
     
     pdf_bytes = generate_exact_screen_pdf(selected_sheet, kpis, chart_bufs, tables_to_pdf)
@@ -665,9 +676,6 @@ elif section == "🚚 Pending Dispatch":
     pd_sheet = st.sidebar.selectbox("Select Pending Dispatch Sheet", sheet_names, index=sheet_names.index(target_pd_sheet) if target_pd_sheet in sheet_names else 0)
     
     df_pd = load_and_clean_sheet(uploaded_file, pd_sheet)
-    
-    # Filter active pending orders (pending qty > 0 and not cancelled)
-    # Ensure invalid or total rows are excluded
     active_pd = df_pd[(df_pd['ACTIVE_PENDING_QTY'] > 0) & (~df_pd['IS_CANCELLED']) & (df_pd['PARTY NAME'] != 'Unknown')].copy()
     
     pd_kpis = {
@@ -702,8 +710,8 @@ elif section == "🚚 Pending Dispatch":
     st.markdown("---")
     st.subheader("📋 Pending Dispatch Detailed Data Table")
     
-    pending_details_df = active_pd[['PO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']].copy()
-    pending_details_df.rename(columns={'ACTIVE_PENDING_QTY': 'PENDING QTY'}, inplace=True)
+    pending_details_df = active_pd[['PO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'THICKNESS_MM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']].copy()
+    pending_details_df.rename(columns={'THICKNESS_MM': 'THICKNESS (mm)', 'ACTIVE_PENDING_QTY': 'PENDING QTY'}, inplace=True)
     st.dataframe(pending_details_df, use_container_width=True)
 
     st.markdown("---")
