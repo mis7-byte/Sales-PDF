@@ -5,10 +5,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 import re
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
 
 # ---------------------------------------------------------
 # Page Configuration
@@ -19,11 +15,11 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS & JavaScript to capture exact screen layout for PDF print/download
+# Advanced CSS rules to ensure tables expand FULLY (no scrollbars) when printing to PDF
 st.markdown("""
     <style>
     @media print {
-        /* Hide sidebar, buttons, and navigation during print/pdf export */
+        /* Hide sidebar, buttons, headers, and footers during print */
         section[data-testid="stSidebar"], .stButton, header, footer, iframe {
             display: none !important;
         }
@@ -34,6 +30,28 @@ st.markdown("""
         }
         body {
             background-color: white !important;
+        }
+        
+        /* EXPAND DATAFRAMES & TABLES TO FULL HEIGHT FOR PDF PRINTING */
+        div[data-testid="stDataFrame"], 
+        div[data-testid="stTable"],
+        div[data-testid="element-container"],
+        .stDataFrame div {
+            height: auto !important;
+            max-height: none !important;
+            overflow: visible !important;
+        }
+        
+        /* Force scrollable table body containers to show all rows */
+        div[data-testid="stDataFrame"] > div > div {
+            max-height: none !important;
+            height: auto !important;
+            overflow: visible !important;
+        }
+        
+        /* Table page break protection */
+        tr, td, th {
+            page-break-inside: avoid !important;
         }
     }
     </style>
@@ -134,7 +152,7 @@ def load_and_clean_sheet(file_bytes, sheet_name):
     df['CANCELLED_QTY'] = np.where(df['IS_CANCELLED'], df['PO QTY (MT)'], 0.0)
     df['ACTIVE_PENDING_QTY'] = np.where(df['IS_CANCELLED'], 0.0, df['PENDING'])
 
-    # Parse Width from dimensions (e.g. 1500X6300 -> 1500)
+    # Parse Width from dimensions
     def parse_width(size_val):
         if pd.isna(size_val):
             return "N/A"
@@ -147,73 +165,6 @@ def load_and_clean_sheet(file_bytes, sheet_name):
     df['WIDTH'] = df['SIZE'].apply(parse_width)
 
     return df
-
-# ---------------------------------------------------------
-# PDF Report Generator
-# ---------------------------------------------------------
-def generate_pdf_report(section_title, sheet_name, kpis, tables_dict):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-    story = []
-    styles = getSampleStyleSheet()
-    
-    title_style = ParagraphStyle(
-        'DocTitle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#1E3A8A'), spaceAfter=10
-    )
-    section_style = ParagraphStyle(
-        'DocSection', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor('#1E40AF'), spaceBefore=10, spaceAfter=6
-    )
-    
-    story.append(Paragraph(f"<b>{section_title} Report — {sheet_name}</b>", title_style))
-    story.append(Spacer(1, 10))
-    
-    if kpis:
-        story.append(Paragraph("Key Performance Indicators (KPIs)", section_style))
-        kpi_data = [["Metric", "Value"]]
-        for k, v in kpis.items():
-            if isinstance(v, (int, np.integer)):
-                val_str = f"{v:,}"
-            elif isinstance(v, (float, np.floating)):
-                val_str = f"₹{v:,.2f}" if "Amount" in k else f"{v:,.2f}"
-            else:
-                val_str = str(v)
-            kpi_data.append([k, val_str])
-            
-        t_kpi = Table(kpi_data, colWidths=[220, 220])
-        t_kpi.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#3B82F6')),
-            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('BOTTOMPADDING', (0,0), (-1,0), 5),
-            ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#F3F4F6')),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#D1D5DB')),
-        ]))
-        story.append(t_kpi)
-        story.append(Spacer(1, 15))
-    
-    for title, df in tables_dict.items():
-        if df is not None and not df.empty:
-            story.append(Paragraph(f"<b>{title}</b>", section_style))
-            sub_df = df.head(20).reset_index(drop=True)
-            table_data = [sub_df.columns.tolist()] + sub_df.values.tolist()
-            table_data = [[str(cell)[:25] for cell in row] for row in table_data]
-            
-            col_width = 480 / max(len(sub_df.columns), 1)
-            t_data = Table(table_data, colWidths=[col_width]*len(sub_df.columns))
-            t_data.setStyle(TableStyle([
-                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#4B5563')),
-                ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-                ('FONTSIZE', (0,0), (-1,-1), 7),
-                ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
-            ]))
-            story.append(t_data)
-            story.append(Spacer(1, 12))
-            
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
 
 # ---------------------------------------------------------
 # Sidebar Controls & Navigation
@@ -374,7 +325,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
     with col_btn:
         st.components.v1.html("""
             <button onclick="window.parent.print()" style="background-color: #1E40AF; color: white; border: none; padding: 10px 16px; font-size: 14px; border-radius: 6px; cursor: pointer; margin-top: 10px; width: 100%;">
-                🖨️ Print Screen to PDF
+                🖨️ Print Full Screen to PDF
             </button>
         """, height=50)
 
@@ -418,7 +369,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
         Pending=('ACTIVE_PENDING_QTY', 'sum')
     ).reset_index()
     st.write("**Sales Executive Item-Wise Breakdown**")
-    st.dataframe(sp_item_grp, use_container_width=True)
+    st.dataframe(sp_item_grp, use_container_width=True, height=len(sp_item_grp) * 38 + 40)
     
     col_a, col_b = st.columns(2)
     with col_a:
@@ -488,7 +439,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
     selected_party = st.selectbox("Filter by Party Name", all_parties)
     
     filtered_party_grp = party_grp if selected_party == "All" else party_grp[party_grp['PARTY NAME'] == selected_party]
-    st.dataframe(filtered_party_grp, use_container_width=True)
+    st.dataframe(filtered_party_grp, use_container_width=True, height=min(len(filtered_party_grp) * 38 + 40, 1000))
     
     fig_party = px.bar(
         filtered_party_grp.head(15), 
@@ -511,7 +462,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
         CancelledQty=('CANCELLED_QTY', 'sum'),
         PendingQty=('ACTIVE_PENDING_QTY', 'sum')
     ).reset_index()
-    st.dataframe(width_grp, use_container_width=True)
+    st.dataframe(width_grp, use_container_width=True, height=len(width_grp) * 38 + 40)
     
     fig_width = px.bar(
         width_grp, 
@@ -571,4 +522,4 @@ elif section == "🚚 Pending Dispatch":
     
     pending_details_df = active_pd[['PO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']]
     pending_details_df.rename(columns={'ACTIVE_PENDING_QTY': 'PENDING QTY'}, inplace=True)
-    st.dataframe(pending_details_df, use_container_width=True)
+    st.dataframe(pending_details_df, use_container_width=True, height=len(pending_details_df) * 38 + 40)
