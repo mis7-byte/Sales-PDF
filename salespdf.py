@@ -105,6 +105,17 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         
     df['AMOUNT'] = df['PO QTY (MT)'] * df['PER TON']
     
+    # Identify Cancelled items from STATUS and REMARK
+    str_cols = ['PARTY NAME', 'SELLER NAME', 'ITEM', 'STATUS', 'REMARK', 'BROKER', 'SECTOR', 'PLACE', 'PO NO', 'DO NO']
+    for c in str_cols:
+        df[c] = df[c].fillna('Unknown').astype(str).str.strip()
+
+    df['IS_CANCELLED'] = df['STATUS'].str.lower().str.contains('cancel') | df['REMARK'].str.lower().str.contains('cancel')
+    
+    # Calculate Cancelled Qty and Adjust Active Pending Qty
+    df['CANCELLED_QTY'] = np.where(df['IS_CANCELLED'], df['PO QTY (MT)'], 0.0)
+    df['ACTIVE_PENDING_QTY'] = np.where(df['IS_CANCELLED'], 0.0, df['PENDING'])
+
     def parse_width(size_val):
         if pd.isna(size_val):
             return "N/A"
@@ -115,10 +126,6 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         return num[0] if num else str(size_val)
 
     df['WIDTH'] = df['SIZE'].apply(parse_width)
-    
-    str_cols = ['PARTY NAME', 'SELLER NAME', 'ITEM', 'STATUS', 'REMARK', 'BROKER', 'SECTOR', 'PLACE', 'PO NO', 'DO NO']
-    for c in str_cols:
-        df[c] = df[c].fillna('Unknown').astype(str).str.strip()
 
     return df
 
@@ -202,7 +209,6 @@ if uploaded_file is None:
 xl = pd.ExcelFile(uploaded_file)
 sheet_names = xl.sheet_names
 
-# Main Navigation Section
 section = st.sidebar.radio("Go to Section", [
     "📅 Month Wise & Date Filter",
     "📊 All Sales & Dispatch Analytics",
@@ -216,7 +222,8 @@ def calculate_kpis(data):
     total_po_qty = data['PO QTY (MT)'].sum()
     total_amount = data['AMOUNT'].sum()
     dispatched_qty = data['DISP.QTY'].sum()
-    pending_qty = data['PENDING'].sum()
+    cancelled_qty = data['CANCELLED_QTY'].sum()
+    pending_qty = data['ACTIVE_PENDING_QTY'].sum()
     
     return {
         'Overall PO Count': total_po,
@@ -225,6 +232,7 @@ def calculate_kpis(data):
         'Total PO Quantity (MT)': total_po_qty,
         'Total PO Amount': total_amount,
         'Dispatched Qty (MT)': dispatched_qty,
+        'Cancelled Qty (MT)': cancelled_qty,
         'Pending Qty (MT)': pending_qty
     }
 
@@ -270,7 +278,7 @@ if section == "📅 Month Wise & Date Filter":
             f"PO Date {selected_date_str}", 
             selected_sheet, 
             d_kpis, 
-            {"PO Details": filtered_df[['PO NO', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'PO QTY (MT)', 'DISP.QTY', 'PENDING']]}
+            {"PO Details": filtered_df[['PO NO', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'PO QTY (MT)', 'DISP.QTY', 'CANCELLED_QTY', 'ACTIVE_PENDING_QTY']]}
         )
         st.download_button("📥 Download Single Date Report PDF", data=pdf_buf, file_name=f"Date_Report_{selected_date_str.replace('/', '-')}.pdf", mime="application/pdf")
 
@@ -310,13 +318,14 @@ if section == "📅 Month Wise & Date Filter":
         kpi2 = calculate_kpis(df2)
         
         comp_df = pd.DataFrame({
-            "Metric": ["Total PO Count", "Ordered Qty (MT)", "Dispatched Qty (MT)", "Pending Qty (MT)", "Total Amount (₹)", "Parties Count"],
-            f"{label1}": [kpi1['Overall PO Count'], kpi1['Total PO Quantity (MT)'], kpi1['Dispatched Qty (MT)'], kpi1['Pending Qty (MT)'], kpi1['Total PO Amount'], kpi1['Number of Parties']],
-            f"{label2}": [kpi2['Overall PO Count'], kpi2['Total PO Quantity (MT)'], kpi2['Dispatched Qty (MT)'], kpi2['Pending Qty (MT)'], kpi2['Total PO Amount'], kpi2['Number of Parties']],
+            "Metric": ["Total PO Count", "Ordered Qty (MT)", "Dispatched Qty (MT)", "Cancelled Qty (MT)", "Pending Qty (MT)", "Total Amount (₹)", "Parties Count"],
+            f"{label1}": [kpi1['Overall PO Count'], kpi1['Total PO Quantity (MT)'], kpi1['Dispatched Qty (MT)'], kpi1['Cancelled Qty (MT)'], kpi1['Pending Qty (MT)'], kpi1['Total PO Amount'], kpi1['Number of Parties']],
+            f"{label2}": [kpi2['Overall PO Count'], kpi2['Total PO Quantity (MT)'], kpi2['Dispatched Qty (MT)'], kpi2['Cancelled Qty (MT)'], kpi2['Pending Qty (MT)'], kpi2['Total PO Amount'], kpi2['Number of Parties']],
             "Difference": [
                 kpi2['Overall PO Count'] - kpi1['Overall PO Count'],
                 kpi2['Total PO Quantity (MT)'] - kpi1['Total PO Quantity (MT)'],
                 kpi2['Dispatched Qty (MT)'] - kpi1['Dispatched Qty (MT)'],
+                kpi2['Cancelled Qty (MT)'] - kpi1['Cancelled Qty (MT)'],
                 kpi2['Pending Qty (MT)'] - kpi1['Pending Qty (MT)'],
                 kpi2['Total PO Amount'] - kpi1['Total PO Amount'],
                 kpi2['Number of Parties'] - kpi1['Number of Parties']
@@ -326,8 +335,8 @@ if section == "📅 Month Wise & Date Filter":
         st.table(comp_df)
         
         fig_comp = go.Figure(data=[
-            go.Bar(name=str(label1), x=["Ordered Qty", "Dispatched Qty", "Pending Qty"], y=[kpi1['Total PO Quantity (MT)'], kpi1['Dispatched Qty (MT)'], kpi1['Pending Qty (MT)']]),
-            go.Bar(name=str(label2), x=["Ordered Qty", "Dispatched Qty", "Pending Qty"], y=[kpi2['Total PO Quantity (MT)'], kpi2['Dispatched Qty (MT)'], kpi2['Pending Qty (MT)']])
+            go.Bar(name=str(label1), x=["Ordered Qty", "Dispatched Qty", "Cancelled Qty", "Pending Qty"], y=[kpi1['Total PO Quantity (MT)'], kpi1['Dispatched Qty (MT)'], kpi1['Cancelled Qty (MT)'], kpi1['Pending Qty (MT)']]),
+            go.Bar(name=str(label2), x=["Ordered Qty", "Dispatched Qty", "Cancelled Qty", "Pending Qty"], y=[kpi2['Total PO Quantity (MT)'], kpi2['Dispatched Qty (MT)'], kpi2['Cancelled Qty (MT)'], kpi2['Pending Qty (MT)']])
         ])
         fig_comp.update_layout(barmode='group', title=f"Comparison: {label1} vs {label2}")
         st.plotly_chart(fig_comp, use_container_width=True)
@@ -337,7 +346,7 @@ if section == "📅 Month Wise & Date Filter":
         st.download_button("📥 Download Comparison Report PDF", data=pdf_buf, file_name=f"Comparison_Report_{label1}_vs_{label2}.pdf", mime="application/pdf")
 
 # =========================================================
-# SECTION 2: ALL SALES & DISPATCH ANALYTICS (MERGED SECTION)
+# SECTION 2: ALL SALES & DISPATCH ANALYTICS
 # =========================================================
 elif section == "📊 All Sales & Dispatch Analytics":
     selected_sheet = st.sidebar.selectbox("Select Month / Sheet", sheet_names)
@@ -355,17 +364,20 @@ elif section == "📊 All Sales & Dispatch Analytics":
     c3.metric("Number of Parties", f"{kpis['Number of Parties']:,}")
     c4.metric("Total PO Qty (MT)", f"{kpis['Total PO Quantity (MT)']:,.2f}")
     
-    c5, c6, c7 = st.columns(3)
+    c5, c6, c7, c8 = st.columns(4)
     c5.metric("Total Amount (PO Qty × Rate)", f"₹{kpis['Total PO Amount']:,.2f}")
     c6.metric("Sum of Dispatched Qty (MT)", f"{kpis['Dispatched Qty (MT)']:,.2f}")
-    c7.metric("Sum of Pending Qty (MT)", f"{kpis['Pending Qty (MT)']:,.2f}")
+    c7.metric("Sum of Cancelled Qty (MT)", f"{kpis['Cancelled Qty (MT)']:,.2f}")
+    c8.metric("Sum of Active Pending Qty (MT)", f"{kpis['Pending Qty (MT)']:,.2f}")
     
+    # Donut Chart with All 3 Statuses (Dispatched, Cancelled, Pending)
     fig_kpi = go.Figure(data=[go.Pie(
-        labels=['Dispatched Qty', 'Pending Qty'],
-        values=[kpis['Dispatched Qty (MT)'], kpis['Pending Qty (MT)']],
+        labels=['Dispatched Qty', 'Cancelled Qty', 'Pending Qty'],
+        values=[kpis['Dispatched Qty (MT)'], kpis['Cancelled Qty (MT)'], kpis['Pending Qty (MT)']],
         hole=.4,
-        marker_colors=['#10B981', '#EF4444']
+        marker_colors=['#10B981', '#F59E0B', '#EF4444']
     )])
+    fig_kpi.update_layout(title="Status Breakdown (Dispatched vs Cancelled vs Pending)")
     st.plotly_chart(fig_kpi, use_container_width=True)
     
     st.markdown("---")
@@ -373,14 +385,11 @@ elif section == "📊 All Sales & Dispatch Analytics":
     # ---------------- 2. SALES PERSON ANALYTICS ----------------
     st.subheader("2. Sales Executive Analytics")
     
-    df['IS_CANCELLED'] = df['STATUS'].str.lower().str.contains('cancel') | df['REMARK'].str.lower().str.contains('cancel')
-    df['CANCELLED_QTY'] = np.where(df['IS_CANCELLED'], df['PO QTY (MT)'], 0)
-    
     sp_item_grp = df.groupby(['SELLER NAME', 'ITEM']).agg(
         OrderedQty=('PO QTY (MT)', 'sum'),
         Dispatched=('DISP.QTY', 'sum'),
-        Pending=('PENDING', 'sum'),
-        CancelledQty=('CANCELLED_QTY', 'sum')
+        CancelledQty=('CANCELLED_QTY', 'sum'),
+        Pending=('ACTIVE_PENDING_QTY', 'sum')
     ).reset_index()
     st.write("**Sales Executive Item-Wise Breakdown**")
     st.dataframe(sp_item_grp, use_container_width=True)
@@ -390,15 +399,15 @@ elif section == "📊 All Sales & Dispatch Analytics":
         st.write("**Cancelled Orders per Sales Person**")
         sp_cancelled = df[df['IS_CANCELLED']].groupby('SELLER NAME').agg(
             CancelledOrders=('PO NO', 'nunique'),
-            CancelledQty=('PO QTY (MT)', 'sum')
+            CancelledQty=('CANCELLED_QTY', 'sum')
         ).reset_index()
         st.dataframe(sp_cancelled, use_container_width=True)
         
     with col_b:
         st.write("**Pending Orders per Sales Person**")
-        sp_pending = df[df['PENDING'] > 0].groupby('SELLER NAME').agg(
+        sp_pending = df[df['ACTIVE_PENDING_QTY'] > 0].groupby('SELLER NAME').agg(
             PendingOrders=('PO NO', 'nunique'),
-            PendingQty=('PENDING', 'sum')
+            PendingQty=('ACTIVE_PENDING_QTY', 'sum')
         ).reset_index()
         st.dataframe(sp_pending, use_container_width=True)
         
@@ -430,7 +439,8 @@ elif section == "📊 All Sales & Dispatch Analytics":
     party_grp = df.groupby(['PARTY NAME', 'SELLER NAME']).agg(
         OrderedQty=('PO QTY (MT)', 'sum'),
         DispatchedQty=('DISP.QTY', 'sum'),
-        PendingQty=('PENDING', 'sum')
+        CancelledQty=('CANCELLED_QTY', 'sum'),
+        PendingQty=('ACTIVE_PENDING_QTY', 'sum')
     ).reset_index()
     
     all_parties = ["All"] + sorted(party_grp['PARTY NAME'].unique().tolist())
@@ -442,8 +452,8 @@ elif section == "📊 All Sales & Dispatch Analytics":
     fig_party = px.bar(
         filtered_party_grp.head(20), 
         x='PARTY NAME', 
-        y=['OrderedQty', 'DispatchedQty', 'PendingQty'],
-        title="Top Parties - Ordered vs Dispatched vs Pending",
+        y=['OrderedQty', 'DispatchedQty', 'CancelledQty', 'PendingQty'],
+        title="Top Parties - Ordered vs Dispatched vs Cancelled vs Pending",
         barmode='group'
     )
     st.plotly_chart(fig_party, use_container_width=True)
@@ -454,16 +464,16 @@ elif section == "📊 All Sales & Dispatch Analytics":
     st.subheader("4. Material & Width Breakdown")
     width_grp = df.groupby(['ITEM', 'WIDTH']).agg(
         OrderedQty=('PO QTY (MT)', 'sum'),
-        PendingQty=('PENDING', 'sum'),
         DispatchedQty=('DISP.QTY', 'sum'),
-        CancelledQty=('CANCELLED_QTY', 'sum')
+        CancelledQty=('CANCELLED_QTY', 'sum'),
+        PendingQty=('ACTIVE_PENDING_QTY', 'sum')
     ).reset_index()
     st.dataframe(width_grp, use_container_width=True)
     
     fig_width = px.bar(
         width_grp, 
         x='WIDTH', 
-        y=['OrderedQty', 'DispatchedQty', 'PendingQty'], 
+        y=['OrderedQty', 'DispatchedQty', 'CancelledQty', 'PendingQty'], 
         color='ITEM',
         title="Qty Breakdown by Width and Item",
         barmode='group'
@@ -483,12 +493,11 @@ elif section == "📊 All Sales & Dispatch Analytics":
     st.download_button("📥 Download Full Analytics PDF Report", data=pdf_buf, file_name=f"Master_Analytics_{selected_sheet}.pdf", mime="application/pdf")
 
 # =========================================================
-# SECTION 3: PENDING DISPATCH (STANDALONE SECTION)
+# SECTION 3: PENDING DISPATCH
 # =========================================================
 elif section == "🚚 Pending Dispatch":
     st.header("🚚 Pending Dispatch Standalone Report")
     
-    # Auto-detect sheet named 'PendingDispatch' or similar
     pd_sheet_candidates = [s for s in sheet_names if 'pending' in s.lower() and 'dispatch' in s.lower()]
     target_pd_sheet = pd_sheet_candidates[0] if pd_sheet_candidates else (sheet_names[0] if sheet_names else None)
     
@@ -496,12 +505,14 @@ elif section == "🚚 Pending Dispatch":
     
     df_pd = load_and_clean_sheet(uploaded_file, pd_sheet)
     
-    # Calculate KPIs for Pending Dispatch
+    # Filter out cancelled orders from pending dispatch view
+    active_pd = df_pd[(df_pd['ACTIVE_PENDING_QTY'] > 0) & (~df_pd['IS_CANCELLED'])]
+    
     pd_kpis = {
-        'Total Pending Orders': df_pd[df_pd['PENDING'] > 0]['PO NO'].replace('Unknown', np.nan).dropna().nunique(),
-        'Total Parties': df_pd[df_pd['PENDING'] > 0]['PARTY NAME'].replace('Unknown', np.nan).dropna().nunique(),
-        'Total Pending Qty (MT)': df_pd['PENDING'].sum(),
-        'Pending Amount (Est. ₹)': (df_pd['PENDING'] * df_pd['PER TON']).sum()
+        'Total Pending Orders': active_pd['PO NO'].replace('Unknown', np.nan).dropna().nunique(),
+        'Total Parties': active_pd['PARTY NAME'].replace('Unknown', np.nan).dropna().nunique(),
+        'Total Pending Qty (MT)': active_pd['ACTIVE_PENDING_QTY'].sum(),
+        'Pending Amount (Est. ₹)': (active_pd['ACTIVE_PENDING_QTY'] * active_pd['PER TON']).sum()
     }
     
     c1, c2, c3, c4 = st.columns(4)
@@ -511,17 +522,12 @@ elif section == "🚚 Pending Dispatch":
     c4.metric("Est. Pending Value", f"₹{pd_kpis['Pending Amount (Est. ₹)']:,.2f}")
     
     st.markdown("---")
-    st.subheader("Pending Quantity Breakdown by Sales Person & Item")
-    
-    pd_summary = df_pd[df_pd['PENDING'] > 0].groupby(['SELLER NAME', 'ITEM', 'PARTY NAME']).agg(
-        PendingQty=('PENDING', 'sum'),
-        OrderedQty=('PO QTY (MT)', 'sum')
-    ).reset_index()
+    st.subheader("Pending Quantity Breakdown by Sales Person")
     
     fig_pd = px.bar(
-        pd_summary.groupby('SELLER NAME')['PendingQty'].sum().reset_index(),
+        active_pd.groupby('SELLER NAME')['ACTIVE_PENDING_QTY'].sum().reset_index(),
         x='SELLER NAME',
-        y='PendingQty',
+        y='ACTIVE_PENDING_QTY',
         title="Pending Dispatch Qty (MT) by Sales Person",
         color_discrete_sequence=['#EF4444']
     )
@@ -530,7 +536,8 @@ elif section == "🚚 Pending Dispatch":
     st.markdown("---")
     st.subheader("📋 Pending Dispatch Detailed Data Table")
     
-    pending_details_df = df_pd[df_pd['PENDING'] > 0][['PO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'PENDING', 'REMARK']]
+    pending_details_df = active_pd[['PO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']]
+    pending_details_df.rename(columns={'ACTIVE_PENDING_QTY': 'PENDING QTY'}, inplace=True)
     st.dataframe(pending_details_df, use_container_width=True)
     
     st.markdown("---")
