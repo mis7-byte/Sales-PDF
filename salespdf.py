@@ -5,10 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 import re
-from reportlab.lib.pagesizes import A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, KeepTogether, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
+import asyncio
+from pyppeteer import launch
 
 # ---------------------------------------------------------
 # Page Configuration
@@ -18,6 +16,28 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
+
+# Screen & Print CSS styling
+st.markdown("""
+    <style>
+    @media print {
+        section[data-testid="stSidebar"], .stButton, header, footer, iframe {
+            display: none !important;
+        }
+        .main .block-container {
+            max-width: 100% !important;
+            padding: 0 !important;
+            margin: 0 !important;
+        }
+        body {
+            background-color: white !important;
+        }
+        tr, td, th {
+            page-break-inside: avoid !important;
+        }
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 st.title("📊 Sales & Dispatch Analytics Dashboard")
 
@@ -126,115 +146,99 @@ def load_and_clean_sheet(file_bytes, sheet_name):
     return df
 
 # ---------------------------------------------------------
-# Robust PDF Generator (Includes embedded charts and auto-wrapping tables)
+# HTML View Generator for Screen-Accurate Exporter
 # ---------------------------------------------------------
-def generate_master_pdf(sheet_name, kpis, plotly_figs, tables_dict):
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=A4,
-        rightMargin=25,
-        leftMargin=25,
-        topMargin=25,
-        bottomMargin=25
-    )
-    story = []
-    styles = getSampleStyleSheet()
-    
-    title_style = ParagraphStyle(
-        'DocTitle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#1E3A8A'), spaceAfter=8
-    )
-    section_style = ParagraphStyle(
-        'DocSection', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor('#1E40AF'), spaceBefore=12, spaceAfter=6
-    )
-    cell_style = ParagraphStyle(
-        'TableCell', parent=styles['Normal'], fontSize=7.5, leading=9, alignment=0
-    )
-    cell_header = ParagraphStyle(
-        'HeaderCell', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.whitesmoke, fontName="Helvetica-Bold", alignment=0
-    )
-    
-    # Title
-    story.append(Paragraph(f"<b>Sales & Dispatch Comprehensive Report — {sheet_name}</b>", title_style))
-    story.append(Spacer(1, 8))
-    
-    # 1. KPIs Section
-    if kpis:
-        story.append(Paragraph("1. Key Performance Indicators Summary", section_style))
-        kpi_data = [[Paragraph("<b>Metric</b>", cell_header), Paragraph("<b>Value</b>", cell_header)]]
-        for k, v in kpis.items():
-            if isinstance(v, (int, np.integer)):
-                val_str = f"{v:,}"
-            elif isinstance(v, (float, np.floating)):
-                val_str = f"₹{v:,.2f}" if "Amount" in k else f"{v:,.2f} MT"
-            else:
-                val_str = str(v)
-            kpi_data.append([Paragraph(k, cell_style), Paragraph(val_str, cell_style)])
-            
-        t_kpi = Table(kpi_data, colWidths=[270, 270])
-        t_kpi.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2563EB')),
-            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-            ('BOTTOMPADDING', (0,0), (-1,0), 5),
-            ('TOPPADDING', (0,0), (-1,0), 5),
-            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F3F4F6')]),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#D1D5DB')),
-        ]))
-        story.append(t_kpi)
-        story.append(Spacer(1, 12))
+async def html_to_pdf_pyppeteer(html_content):
+    browser = await launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+    page = await browser.newPage()
+    await page.setContent(html_content, waitUntil='networkidle0')
+    pdf_data = await page.pdf({
+        'format': 'A4',
+        'printBackground': True,
+        'margin': {'top': '20px', 'right': '20px', 'bottom': '20px', 'left': '20px'}
+    })
+    await browser.close()
+    return pdf_data
 
-    # 2. Convert and Embed Plotly Charts
-    for fig_title, fig in plotly_figs.items():
+def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <style>
+            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; color: #1F2937; background: #FFF; }}
+            h1 {{ color: #1E3A8A; border-bottom: 2px solid #2563EB; padding-bottom: 8px; font-size: 24px; }}
+            h2 {{ color: #1E40AF; font-size: 18px; margin-top: 25px; margin-bottom: 10px; }}
+            .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }}
+            .kpi-card {{ background: #F3F4F6; border-radius: 8px; padding: 12px; border-left: 4px solid #2563EB; }}
+            .kpi-title {{ font-size: 11px; color: #4B5563; font-weight: bold; text-transform: uppercase; }}
+            .kpi-value {{ font-size: 18px; color: #111827; font-weight: bold; margin-top: 4px; }}
+            .chart-container {{ width: 100%; text-align: center; margin-bottom: 20px; page-break-inside: avoid; }}
+            .chart-img {{ max-width: 100%; height: auto; border-radius: 6px; border: 1px solid #E5E7EB; }}
+            table {{ width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 20px; font-size: 11px; }}
+            th {{ background-color: #1F2937; color: white; text-align: left; padding: 8px; font-weight: 600; }}
+            td {{ padding: 7px 8px; border-bottom: 1px solid #E5E7EB; }}
+            tr:nth-child(even) {{ background-color: #F9FAFB; }}
+            tr, td, th {{ page-break-inside: avoid !important; }}
+        </style>
+    </head>
+    <body>
+        <h1>📊 Sales & Dispatch Analytics — {sheet_name}</h1>
+        
+        <h2>1. Key Performance Indicators (KPIs)</h2>
+        <div class="kpi-grid">
+            <div class="kpi-card"><div class="kpi-title">Overall PO Count</div><div class="kpi-value">{kpis['Overall PO Count']:,}</div></div>
+            <div class="kpi-card"><div class="kpi-title">Overall DO Count</div><div class="kpi-value">{kpis['Overall DO Count']:,}</div></div>
+            <div class="kpi-card"><div class="kpi-title">Number of Parties</div><div class="kpi-value">{kpis['Number of Parties']:,}</div></div>
+            <div class="kpi-card"><div class="kpi-title">Total PO Qty</div><div class="kpi-value">{kpis['Total PO Quantity (MT)']:,.2f} MT</div></div>
+            <div class="kpi-card"><div class="kpi-title">Total PO Amount</div><div class="kpi-value">₹{kpis['Total PO Amount']:,.2f}</div></div>
+            <div class="kpi-card"><div class="kpi-title">Dispatched Qty</div><div class="kpi-value">{kpis['Dispatched Qty (MT)']:,.2f} MT</div></div>
+            <div class="kpi-card"><div class="kpi-title">Cancelled Qty</div><div class="kpi-value">{kpis['Cancelled Qty (MT)']:,.2f} MT</div></div>
+            <div class="kpi-card"><div class="kpi-title">Pending Qty</div><div class="kpi-value">{kpis['Pending Qty (MT)']:,.2f} MT</div></div>
+        </div>
+    """
+    
+    # Append Plotly Charts as Images
+    for title, fig in plotly_figs.items():
         if fig is not None:
             try:
-                img_bytes = fig.to_image(format="png", width=750, height=350, scale=2)
-                img_buffer = io.BytesIO(img_bytes)
-                story.append(KeepTogether([
-                    Paragraph(f"<b>{fig_title}</b>", section_style),
-                    Spacer(1, 4),
-                    Image(img_buffer, width=540, height=252),
-                    Spacer(1, 10)
-                ]))
+                img_bytes = fig.to_image(format="png", width=900, height=420, scale=2)
+                import base64
+                b64_img = base64.b64encode(img_bytes).decode('utf-8')
+                html += f"""
+                <div class="chart-container">
+                    <h2 style="text-align: left;">{title}</h2>
+                    <img class="chart-img" src="data:image/png;base64,{b64_img}" />
+                </div>
+                """
             except Exception:
-                pass # Fallback if kaleido engine is not available
+                pass
 
-    # 3. Comprehensive Data Tables with Auto-Wrapping
+    # Append Full Dynamic Data Tables
     for title, df_table in tables_dict.items():
         if df_table is not None and not df_table.empty:
-            story.append(Paragraph(f"<b>{title}</b>", section_style))
+            html += f"<h2>{title}</h2><table><thead><tr>"
+            for col in df_table.columns:
+                html += f"<th>{col}</th>"
+            html += "</tr></thead><tbody>"
             
-            sub_df = df_table.copy().reset_index(drop=True)
-            cols = sub_df.columns.tolist()
+            for _, row in df_table.iterrows():
+                html += "<tr>"
+                for val in row:
+                    val_str = f"{val:,.2f}" if isinstance(val, (float, np.floating)) else str(val)
+                    html += f"<td>{val_str}</td>"
+                html += "</tr>"
+            html += "</tbody></table>"
             
-            # Format numbers safely
-            for c in sub_df.select_dtypes(include=[np.number]).columns:
-                sub_df[c] = sub_df[c].apply(lambda x: f"{x:,.2f}" if pd.notnull(x) else "")
-
-            # Build Wrapped Table Data
-            table_data = [[Paragraph(f"<b>{col}</b>", cell_header) for col in cols]]
-            for row in sub_df.values.tolist():
-                table_data.append([Paragraph(str(cell), cell_style) for cell in row])
-            
-            available_width = 540
-            col_width = available_width / max(len(cols), 1)
-            
-            t_data = Table(table_data, colWidths=[col_width]*len(cols), repeatRows=1)
-            t_data.setStyle(TableStyle([
-                ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1F2937')),
-                ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-                ('VALIGN', (0,0), (-1,-1), 'TOP'),
-                ('TOPPADDING', (0,0), (-1,-1), 4),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
-                ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F9FAFB')]),
-                ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
-            ]))
-            
-            story.append(t_data)
-            story.append(Spacer(1, 12))
-            
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
+    html += "</body></html>"
+    
+    try:
+        pdf_bytes = asyncio.run(html_to_pdf_pyppeteer(html))
+        return pdf_bytes
+    except Exception:
+        # Fallback buffer
+        return None
 
 # ---------------------------------------------------------
 # Sidebar Controls & Navigation
@@ -407,7 +411,6 @@ elif section == "📊 All Sales & Dispatch Analytics":
     c7.metric("Sum of Cancelled Qty (MT)", f"{kpis['Cancelled Qty (MT)']:,.2f}")
     c8.metric("Sum of Active Pending Qty (MT)", f"{kpis['Pending Qty (MT)']:,.2f}")
     
-    # Donut Chart with Data Labels
     fig_kpi = go.Figure(data=[go.Pie(
         labels=['Dispatched Qty', 'Cancelled Qty', 'Pending Qty'],
         values=[kpis['Dispatched Qty (MT)'], kpis['Cancelled Qty (MT)'], kpis['Pending Qty (MT)']],
@@ -540,7 +543,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
     st.plotly_chart(fig_width, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("📥 Export Complete High-Quality PDF Report")
+    st.subheader("📄 Download Dashboard Screen View PDF")
     
     plotly_figs = {
         "Overall Status Breakdown": fig_kpi,
@@ -558,13 +561,14 @@ elif section == "📊 All Sales & Dispatch Analytics":
         "Material & Width Breakdown Summary": width_grp
     }
     
-    pdf_buf = generate_master_pdf(selected_sheet, kpis, plotly_figs, tables_to_pdf)
-    st.download_button(
-        "📄 Download Full PDF Report (With Embedded Charts & Complete Tables)", 
-        data=pdf_buf, 
-        file_name=f"Master_Analytics_{selected_sheet}.pdf", 
-        mime="application/pdf"
-    )
+    pdf_bytes = generate_exact_screen_pdf(selected_sheet, kpis, plotly_figs, tables_to_pdf)
+    if pdf_bytes:
+        st.download_button(
+            "📥 Download Screen-Matching PDF Report", 
+            data=pdf_bytes, 
+            file_name=f"Exact_Dashboard_Report_{selected_sheet}.pdf", 
+            mime="application/pdf"
+        )
 
 # =========================================================
 # SECTION 3: PENDING DISPATCH
@@ -615,17 +619,18 @@ elif section == "🚚 Pending Dispatch":
     st.dataframe(pending_details_df, use_container_width=True)
 
     st.markdown("---")
-    st.subheader("📥 Export Pending Dispatch Report")
+    st.subheader("📥 Export Pending Dispatch Screen View PDF")
     
-    pdf_buf = generate_master_pdf(
+    pdf_bytes = generate_exact_screen_pdf(
         pd_sheet,
         pd_kpis,
         {"Pending Quantity Breakdown": fig_pd},
         {"Pending Dispatch Details": pending_details_df}
     )
-    st.download_button(
-        "📄 Download Pending Dispatch PDF",
-        data=pdf_buf,
-        file_name=f"Pending_Dispatch_{pd_sheet}.pdf",
-        mime="application/pdf"
-    )
+    if pdf_bytes:
+        st.download_button(
+            "📥 Download Screen-Matching Pending Dispatch PDF",
+            data=pdf_bytes,
+            file_name=f"Exact_Pending_Dispatch_{pd_sheet}.pdf",
+            mime="application/pdf"
+        )
