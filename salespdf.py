@@ -62,10 +62,14 @@ def parse_size(size_val):
     return None, None
 
 def safe_convert_date(series):
-    """Converts date series safely, coercing invalid years (<2000 or >2099) to NaT."""
+    """Converts date series safely, coercing invalid years (<2000 or >2099) to NaT across all Pandas versions."""
     clean_series = series.astype(str).str.strip()
     parsed_dates = pd.to_datetime(clean_series, errors='coerce', format='mixed')
-    valid_mask = parsed_dates.dt.year.between(2000, 2099, na=False)
+    
+    years = parsed_dates.dt.year
+    valid_mask = (years >= 2000) & (years <= 2099)
+    valid_mask = valid_mask.fillna(False)
+    
     return parsed_dates.where(valid_mask, pd.NaT)
 
 def clean_numeric(series):
@@ -133,7 +137,7 @@ def load_excel_data(uploaded_file):
             cleaned['SHEET_NAME'] = sheet
             monthly_dfs.append(cleaned)
 
-    combined_monthly = pd.concat(monthly_dfs, ignore_ignore_index=True) if monthly_dfs else pd.DataFrame()
+    combined_monthly = pd.concat(monthly_dfs, ignore_index=True) if monthly_dfs else pd.DataFrame()
     return combined_monthly, pending_df
 
 # ---------------------------------------------------------
