@@ -13,7 +13,7 @@ from reportlab.lib import colors
 # Set Streamlit Page Configuration
 st.set_page_config(page_title="Sales Analytics & PDF Exporter", layout="wide", initial_sidebar_state="expanded")
 
-st.title("📊 Monthly Sales Analytics & Dispatch Dashboard")
+st.title("📊 Monthly & Overall Sales Analytics Dashboard")
 
 # -----------------------------------------------------------------------------
 # HELPER FUNCTIONS & DATA CLEANING
@@ -55,7 +55,7 @@ def load_all_sheets(uploaded_file):
                 df = pd.read_excel(xl, sheet_name=sheet, skiprows=header_idx)
                 df.columns = [str(c).strip().upper() for c in df.columns]
                 
-                # Column mapping for consistency
+                # Column mapping for consistency across historical sheets
                 rename_map = {
                     'S. NO.': 'S_NO', 'SR NO': 'S_NO', 'SR NO ': 'S_NO',
                     'DO .NO.': 'DO NO', 'DO NO ': 'DO NO',
@@ -118,7 +118,7 @@ def process_dataframe(df, sheet_name):
     df["MONTH_SHEET"] = sheet_name
     return df
 
-# PDF Generation Function matching active view table
+# PDF Generation Helper
 def generate_pdf_report(df_summary, title="Sales Data Report"):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), rightMargin=15, leftMargin=15, topMargin=20, bottomMargin=20)
@@ -128,14 +128,12 @@ def generate_pdf_report(df_summary, title="Sales Data Report"):
     story.append(Paragraph(f"<b>{title}</b>", styles['Title']))
     story.append(Spacer(1, 10))
 
-    # Determine best column set for printable PDF
-    cols_to_include = [c for c in ["PO NO", "DO NO", "PARTY NAME", "BROKER", "SELLER NAME", "ITEM", "SIZE", "PO QTY (MT)", "PER TON", "DISP.QTY", "PENDING", "STATUS"] if c in df_summary.columns]
+    cols_to_include = [c for c in df_summary.columns if c not in ["MONTH_SHEET", "S_NO", "MOBILE NO"]]
     pdf_df = df_summary[cols_to_include].copy()
 
-    # Format numeric values nicely
-    for c in ["PO QTY (MT)", "PER TON", "DISP.QTY", "PENDING"]:
-        if c in pdf_df.columns:
-            pdf_df[c] = pdf_df[c].apply(lambda x: f"{x:,.2f}" if isinstance(x, (int, float)) else str(x))
+    # Format numbers nicely
+    for c in pdf_df.select_dtypes(include=[np.number]).columns:
+        pdf_df[c] = pdf_df[c].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "0.00")
 
     data = [pdf_df.columns.tolist()] + pdf_df.astype(str).values.tolist()
     table = Table(data, repeatRows=1)
@@ -165,146 +163,192 @@ if uploaded_file is not None:
     monthly_data, pending_df = load_all_sheets(uploaded_file)
     available_months = list(monthly_data.keys())
 
+    # Combine all month sheets for overall calculations
+    all_months_df = pd.concat(monthly_data.values(), ignore_index=True) if monthly_data else pd.DataFrame()
+
     st.sidebar.markdown("---")
-    st.sidebar.header("🗓️ Select Month")
-    selected_month = st.sidebar.selectbox("Select Primary Month:", available_months, index=len(available_months)-1 if available_months else 0)
+    st.sidebar.header("🗓️ Select View Mode")
 
-    # Secondary Month Comparison
-    chk_compare_months = st.sidebar.checkbox("Compare Between Two Months")
-    compare_month = None
-    if chk_compare_months:
-        compare_options = [m for m in available_months if m != selected_month]
-        compare_month = st.sidebar.selectbox("Select Second Month to Compare:", compare_options)
-
-    chk_pending_dispatch = st.sidebar.checkbox("Show Pending Dispatch Section", value=True)
-
-    # Retrieve base sheet dataframe
-    raw_df = monthly_data.get(selected_month, pd.DataFrame())
-
-    # -----------------------------------------------------------------------------
-    # SIDEBAR SPECIFIC FILTERS (BROKER, STATUS, SIZE)
-    # -----------------------------------------------------------------------------
-    st.sidebar.markdown("---")
-    st.sidebar.header("🔍 Dynamic Data Filters")
-
-    filtered_df = raw_df.copy()
-
-    # 1. Order Status Filter
-    if "STATUS" in raw_df.columns:
-        status_list = ["ALL"] + sorted([s for s in raw_df["STATUS"].dropna().unique() if s != "NAN"])
-        selected_status = st.sidebar.selectbox("Filter by Order Status:", status_list)
-        if selected_status != "ALL":
-            filtered_df = filtered_df[filtered_df["STATUS"] == selected_status]
-
-    # 2. Broker / Direct Order Filter
-    if "BROKER" in raw_df.columns:
-        broker_options = ["ALL", "DIRECT ORDERS ONLY", "BROKER ORDERS ONLY"]
-        selected_broker_type = st.sidebar.selectbox("Filter Broker vs Direct:", broker_options)
-        if selected_broker_type == "DIRECT ORDERS ONLY":
-            filtered_df = filtered_df[filtered_df["BROKER"].isin(["DIRECT", "NONE", "NAN", "", "N/A"])]
-        elif selected_broker_type == "BROKER ORDERS ONLY":
-            filtered_df = filtered_df[~filtered_df["BROKER"].isin(["DIRECT", "NONE", "NAN", "", "N/A"])]
-
-    # 3. Width Filter
-    if "WIDTH" in raw_df.columns and raw_df["WIDTH"].notna().any():
-        valid_widths = sorted(raw_df["WIDTH"].dropna().unique())
-        width_opts = ["ALL"] + [str(w) for w in valid_widths]
-        selected_width = st.sidebar.selectbox("Filter by Width (mm):", width_opts)
-        if selected_width != "ALL":
-            filtered_df = filtered_df[filtered_df["WIDTH"] == float(selected_width)]
-
-    # 4. Length Filter
-    if "LENGTH" in raw_df.columns and raw_df["LENGTH"].notna().any():
-        valid_lengths = sorted(raw_df["LENGTH"].dropna().unique())
-        length_opts = ["ALL"] + [str(l) for l in valid_lengths]
-        selected_length = st.sidebar.selectbox("Filter by Length (mm):", length_opts)
-        if selected_length != "ALL":
-            filtered_df = filtered_df[filtered_df["LENGTH"] == float(selected_length)]
-
-    # -----------------------------------------------------------------------------
-    # KPI SECTION
-    # -----------------------------------------------------------------------------
-    st.markdown(f"## 📌 Key Metrics - {selected_month}")
-
-    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-    sum_po_qty = filtered_df["PO QTY (MT)"].sum() if "PO QTY (MT)" in filtered_df else 0
-    sum_disp_qty = filtered_df["DISP.QTY"].sum() if "DISP.QTY" in filtered_df else 0
-    sum_pending_qty = filtered_df["PENDING"].sum() if "PENDING" in filtered_df else 0
-    total_rev = filtered_df["TOTAL REVENUE"].sum() if "TOTAL REVENUE" in filtered_df else 0
-
-    kpi1.metric("Total Order Qty (MT)", f"{sum_po_qty:,.2f}")
-    kpi2.metric("Dispatched Qty (MT)", f"{sum_disp_qty:,.2f}")
-    kpi3.metric("Pending Qty (MT)", f"{sum_pending_qty:,.2f}")
-    kpi4.metric("Total Revenue (₹)", f"₹{total_rev:,.2f}")
-
-    # Breakdown Metrics for Broker vs Direct
-    if "BROKER" in filtered_df.columns:
-        direct_mask = filtered_df["BROKER"].isin(["DIRECT", "NONE", "NAN", "", "N/A"])
-        direct_qty = filtered_df[direct_mask]["PO QTY (MT)"].sum() if "PO QTY (MT)" in filtered_df else 0
-        broker_qty = filtered_df[~direct_mask]["PO QTY (MT)"].sum() if "PO QTY (MT)" in filtered_df else 0
-
-        bc1, bc2 = st.columns(2)
-        bc1.info(f"🤝 **Broker Orders Qty:** {broker_qty:,.2f} MT")
-        bc2.success(f"🏢 **Direct Orders Qty:** {direct_qty:,.2f} MT")
-
-    # -----------------------------------------------------------------------------
-    # MONTH COMPARISON SECTION
-    # -----------------------------------------------------------------------------
-    if chk_compare_months and compare_month:
-        comp_df = monthly_data.get(compare_month, pd.DataFrame())
-        st.markdown("---")
-        st.markdown(f"### ⚖️ Month Comparison: **{selected_month}** vs **{compare_month}**")
-
-        c_po_qty = comp_df["PO QTY (MT)"].sum() if "PO QTY (MT)" in comp_df else 0
-        c_disp_qty = comp_df["DISP.QTY"].sum() if "DISP.QTY" in comp_df else 0
-        c_pending_qty = comp_df["PENDING"].sum() if "PENDING" in comp_df else 0
-        c_rev = comp_df["TOTAL REVENUE"].sum() if "TOTAL REVENUE" in comp_df else 0
-
-        cc1, cc2, cc3, cc4 = st.columns(4)
-        cc1.metric(f"PO Qty ({compare_month})", f"{c_po_qty:,.2f}", delta=f"{sum_po_qty - c_po_qty:,.2f}")
-        cc2.metric(f"Dispatched ({compare_month})", f"{c_disp_qty:,.2f}", delta=f"{sum_disp_qty - c_disp_qty:,.2f}")
-        cc3.metric(f"Pending ({compare_month})", f"{c_pending_qty:,.2f}", delta=f"{sum_pending_qty - c_pending_qty:,.2f}")
-        cc4.metric(f"Revenue ({compare_month})", f"₹{c_rev:,.2f}", delta=f"₹{total_rev - c_rev:,.2f}")
-
-    # -----------------------------------------------------------------------------
-    # DATA TABLE & PDF DOWNLOAD SECTION
-    # -----------------------------------------------------------------------------
-    st.markdown("---")
-    st.header(f"📋 Data View - {selected_month}")
-    st.dataframe(filtered_df, use_container_width=True)
-
-    st.markdown("### 📥 Download PDF Report")
-    pdf_buf = generate_pdf_report(filtered_df, title=f"Sales Report - {selected_month}")
-    st.download_button(
-        label=f"📄 Download PDF Report ({selected_month})",
-        data=pdf_buf,
-        file_name=f"Sales_Report_{selected_month}.pdf",
-        mime="application/pdf"
+    view_mode = st.sidebar.radio(
+        "Select Dashboard View:",
+        ["Monthly Detail View", "Overall Party-Wise Summary", "Overall Salesperson Summary"]
     )
 
-    # -----------------------------------------------------------------------------
-    # PENDING DISPATCH SECTION
-    # -----------------------------------------------------------------------------
-    if chk_pending_dispatch and not pending_df.empty:
-        st.markdown("<br><hr style='border:2px solid red;'><br>", unsafe_allow_html=True)
-        st.header("🔴 PENDING DISPATCH REPORT & DASHBOARD")
+    if view_mode == "Monthly Detail View":
+        selected_month = st.sidebar.selectbox("Select Primary Month:", available_months, index=len(available_months)-1 if available_months else 0)
 
-        p_col1, p_col2, p_col3, p_col4 = st.columns(4)
-        p_col1.metric("Pending Orders Count", len(pending_df))
-        p_col2.metric("Total Pending Qty (MT)", f"{pending_df['PENDING'].sum():,.2f}")
-        p_col3.metric("Total Revenue (₹)", f"₹{pending_df['TOTAL REVENUE'].sum():,.2f}")
-        p_col4.metric("Affected Parties", pending_df["PARTY NAME"].nunique() if "PARTY NAME" in pending_df else 0)
+        # Secondary Month Comparison
+        chk_compare_months = st.sidebar.checkbox("Compare Between Two Months")
+        compare_month = None
+        if chk_compare_months:
+            compare_options = [m for m in available_months if m != selected_month]
+            compare_month = st.sidebar.selectbox("Select Second Month to Compare:", compare_options)
 
-        st.dataframe(pending_df, use_container_width=True)
+        chk_pending_dispatch = st.sidebar.checkbox("Show Pending Dispatch Section", value=True)
 
-        # PDF Download for Pending Section
-        pending_pdf_buf = generate_pdf_report(pending_df, title="Pending Dispatch Report")
+        raw_df = monthly_data.get(selected_month, pd.DataFrame())
+
+        # Dynamic Filters
+        st.sidebar.markdown("---")
+        st.sidebar.header("🔍 Dynamic Data Filters")
+
+        filtered_df = raw_df.copy()
+
+        if "STATUS" in raw_df.columns:
+            status_list = ["ALL"] + sorted([s for s in raw_df["STATUS"].dropna().unique() if str(s).strip() not in ["NAN", ""]])
+            selected_status = st.sidebar.selectbox("Filter by Order Status:", status_list)
+            if selected_status != "ALL":
+                filtered_df = filtered_df[filtered_df["STATUS"] == selected_status]
+
+        if "BROKER" in raw_df.columns:
+            broker_options = ["ALL", "DIRECT ORDERS ONLY", "BROKER ORDERS ONLY"]
+            selected_broker_type = st.sidebar.selectbox("Filter Broker vs Direct:", broker_options)
+            if selected_broker_type == "DIRECT ORDERS ONLY":
+                filtered_df = filtered_df[filtered_df["BROKER"].isin(["DIRECT", "NONE", "NAN", "", "N/A"])]
+            elif selected_broker_type == "BROKER ORDERS ONLY":
+                filtered_df = filtered_df[~filtered_df["BROKER"].isin(["DIRECT", "NONE", "NAN", "", "N/A"])]
+
+        # Key Metrics
+        st.markdown(f"## 📌 Key Metrics - {selected_month}")
+
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        sum_po_qty = filtered_df["PO QTY (MT)"].sum() if "PO QTY (MT)" in filtered_df else 0
+        sum_disp_qty = filtered_df["DISP.QTY"].sum() if "DISP.QTY" in filtered_df else 0
+        sum_pending_qty = filtered_df["PENDING"].sum() if "PENDING" in filtered_df else 0
+        total_rev = filtered_df["TOTAL REVENUE"].sum() if "TOTAL REVENUE" in filtered_df else 0
+
+        kpi1.metric("Total Order Qty (MT)", f"{sum_po_qty:,.2f}")
+        kpi2.metric("Dispatched Qty (MT)", f"{sum_disp_qty:,.2f}")
+        kpi3.metric("Pending Qty (MT)", f"{sum_pending_qty:,.2f}")
+        kpi4.metric("Total Revenue (₹)", f"₹{total_rev:,.2f}")
+
+        # Comparison Section
+        if chk_compare_months and compare_month:
+            comp_df = monthly_data.get(compare_month, pd.DataFrame())
+            st.markdown("---")
+            st.markdown(f"### ⚖️ Month Comparison: **{selected_month}** vs **{compare_month}**")
+
+            c_po_qty = comp_df["PO QTY (MT)"].sum() if "PO QTY (MT)" in comp_df else 0
+            c_disp_qty = comp_df["DISP.QTY"].sum() if "DISP.QTY" in comp_df else 0
+            c_pending_qty = comp_df["PENDING"].sum() if "PENDING" in comp_df else 0
+            c_rev = comp_df["TOTAL REVENUE"].sum() if "TOTAL REVENUE" in comp_df else 0
+
+            cc1, cc2, cc3, cc4 = st.columns(4)
+            cc1.metric(f"PO Qty ({compare_month})", f"{c_po_qty:,.2f}", delta=f"{sum_po_qty - c_po_qty:,.2f}")
+            cc2.metric(f"Dispatched ({compare_month})", f"{c_disp_qty:,.2f}", delta=f"{sum_disp_qty - c_disp_qty:,.2f}")
+            cc3.metric(f"Pending ({compare_month})", f"{c_pending_qty:,.2f}", delta=f"{sum_pending_qty - c_pending_qty:,.2f}")
+            cc4.metric(f"Revenue ({compare_month})", f"₹{c_rev:,.2f}", delta=f"₹{total_rev - c_rev:,.2f}")
+
+        # Data View & Export
+        st.markdown("---")
+        st.header(f"📋 Data View - {selected_month}")
+        st.dataframe(filtered_df, use_container_width=True)
+
+        st.markdown("### 📥 Download PDF Report")
+        pdf_buf = generate_pdf_report(filtered_df, title=f"Sales Report - {selected_month}")
         st.download_button(
-            label="📄 Download Pending Dispatch PDF",
-            data=pending_pdf_buf,
-            file_name="Pending_Dispatch_Report.pdf",
+            label=f"📄 Download PDF Report ({selected_month})",
+            data=pdf_buf,
+            file_name=f"Sales_Report_{selected_month}.pdf",
             mime="application/pdf"
         )
+
+        if chk_pending_dispatch and not pending_df.empty:
+            st.markdown("<br><hr style='border:2px solid red;'><br>", unsafe_allow_html=True)
+            st.header("🔴 PENDING DISPATCH REPORT & DASHBOARD")
+
+            p_col1, p_col2, p_col3, p_col4 = st.columns(4)
+            p_col1.metric("Pending Orders Count", len(pending_df))
+            p_col2.metric("Total Pending Qty (MT)", f"{pending_df['PENDING'].sum():,.2f}")
+            p_col3.metric("Total Revenue (₹)", f"₹{pending_df['TOTAL REVENUE'].sum():,.2f}")
+            p_col4.metric("Affected Parties", pending_df["PARTY NAME"].nunique() if "PARTY NAME" in pending_df else 0)
+
+            st.dataframe(pending_df, use_container_width=True)
+
+            pending_pdf_buf = generate_pdf_report(pending_df, title="Pending Dispatch Report")
+            st.download_button(
+                label="📄 Download Pending Dispatch PDF",
+                data=pending_pdf_buf,
+                file_name="Pending_Dispatch_Report.pdf",
+                mime="application/pdf"
+            )
+
+    elif view_mode == "Overall Party-Wise Summary":
+        st.header("🏢 Overall Party-Wise Sales Summary")
+
+        if "PARTY NAME" in all_months_df.columns:
+            party_summary = all_months_df.groupby("PARTY NAME").agg(
+                Total_Orders=("PO NO", "nunique"),
+                Total_PO_Qty_MT=("PO QTY (MT)", "sum"),
+                Total_Dispatched_MT=("DISP.QTY", "sum"),
+                Total_Pending_MT=("PENDING", "sum"),
+                Total_Revenue_INR=("TOTAL REVENUE", "sum")
+            ).reset_index().sort_values(by="Total_PO_Qty_MT", ascending=False)
+
+            p_col1, p_col2, p_col3 = st.columns(3)
+            p_col1.metric("Total Unique Parties", len(party_summary))
+            p_col2.metric("Top Party Volume (MT)", f"{party_summary['Total_PO_Qty_MT'].max():,.2f}")
+            p_col3.metric("Total Overall Revenue (₹)", f"₹{party_summary['Total_Revenue_INR'].sum():,.2f}")
+
+            st.markdown("---")
+            st.subheader("📊 Top 10 Parties by Order Quantity")
+            fig, ax = plt.subplots(figsize=(10, 4))
+            sns.barplot(data=party_summary.head(10), x="Total_PO_Qty_MT", y="PARTY NAME", ax=ax, palette="Blues_r")
+            ax.set_xlabel("Total PO Quantity (MT)")
+            ax.set_ylabel("Party Name")
+            st.pyplot(fig)
+
+            st.markdown("---")
+            st.subheader("📋 Party Summary Table")
+            st.dataframe(party_summary, use_container_width=True)
+
+            st.markdown("### 📥 Download Party Summary PDF")
+            party_pdf = generate_pdf_report(party_summary, title="Overall Party-Wise Sales Summary")
+            st.download_button(
+                label="📄 Download Overall Party Summary PDF",
+                data=party_pdf,
+                file_name="Overall_Party_Summary.pdf",
+                mime="application/pdf"
+            )
+
+    elif view_mode == "Overall Salesperson Summary":
+        st.header("👨‍💼 Overall Salesperson Performance Summary")
+
+        if "SELLER NAME" in all_months_df.columns:
+            seller_summary = all_months_df.groupby("SELLER NAME").agg(
+                Total_Orders=("PO NO", "nunique"),
+                Total_Parties=("PARTY NAME", "nunique"),
+                Total_PO_Qty_MT=("PO QTY (MT)", "sum"),
+                Total_Dispatched_MT=("DISP.QTY", "sum"),
+                Total_Pending_MT=("PENDING", "sum"),
+                Total_Revenue_INR=("TOTAL REVENUE", "sum")
+            ).reset_index().sort_values(by="Total_PO_Qty_MT", ascending=False)
+
+            s_col1, s_col2, s_col3 = st.columns(3)
+            s_col1.metric("Active Salespersons", len(seller_summary))
+            s_col2.metric("Top Salesperson Volume (MT)", f"{seller_summary['Total_PO_Qty_MT'].max():,.2f}")
+            s_col3.metric("Total Overall Revenue (₹)", f"₹{seller_summary['Total_Revenue_INR'].sum():,.2f}")
+
+            st.markdown("---")
+            st.subheader("📊 Salesperson Performance Breakdown")
+            fig, ax = plt.subplots(figsize=(10, 4))
+            sns.barplot(data=seller_summary, x="SELLER NAME", y="Total_PO_Qty_MT", ax=ax, palette="viridis")
+            plt.xticks(rotation=45)
+            ax.set_ylabel("Total PO Quantity (MT)")
+            st.pyplot(fig)
+
+            st.markdown("---")
+            st.subheader("📋 Salesperson Summary Table")
+            st.dataframe(seller_summary, use_container_width=True)
+
+            st.markdown("### 📥 Download Salesperson Summary PDF")
+            seller_pdf = generate_pdf_report(seller_summary, title="Overall Salesperson Performance Summary")
+            st.download_button(
+                label="📄 Download Overall Salesperson Summary PDF",
+                data=seller_pdf,
+                file_name="Overall_Salesperson_Summary.pdf",
+                mime="application/pdf"
+            )
 
 else:
     st.info("👈 Please upload your `Sales Data.xlsx` workbook in the left sidebar to get started.")
