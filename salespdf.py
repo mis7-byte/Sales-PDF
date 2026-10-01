@@ -88,13 +88,17 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         if std_col not in df.columns:
             df[std_col] = np.nan
 
-    # Datetime conversions (Primary focus on PO DATE)
-    df['PO DATE'] = pd.to_datetime(df['PO DATE'], errors='coerce')
-    df['DATE'] = pd.to_datetime(df['DATE'], errors='coerce')
+    # Datetime conversions with Day-First and Dot Handling
+    if 'PO DATE' in df.columns:
+        po_date_clean = df['PO DATE'].astype(str).str.replace('.', '/', regex=False)
+        df['PO DATE'] = pd.to_datetime(po_date_clean, dayfirst=True, errors='coerce')
+
+    if 'DATE' in df.columns:
+        disp_date_clean = df['DATE'].astype(str).str.replace('.', '/', regex=False)
+        df['DATE'] = pd.to_datetime(disp_date_clean, dayfirst=True, errors='coerce')
     
     # Formatted strings for UI display (DD/MM/YYYY)
     df['PO_DATE_STR'] = df['PO DATE'].dt.strftime('%d/%m/%Y').fillna('N/A')
-    df['PO_MONTH_YEAR'] = df['PO DATE'].dt.strftime('%m/%Y').fillna('N/A')
     
     numeric_cols = ['PO QTY (MT)', 'PER TON', 'DISP.QTY', 'PENDING']
     for col in numeric_cols:
@@ -120,60 +124,64 @@ def load_and_clean_sheet(file_bytes, sheet_name):
     return df
 
 # ---------------------------------------------------------
-# PDF Generator Tool
+# PDF Report Generator Function
 # ---------------------------------------------------------
-def generate_pdf_report(month_name, kpis, tables_dict):
+def generate_pdf_report(section_title, sheet_name, kpis, tables_dict):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
     story = []
     styles = getSampleStyleSheet()
     
     title_style = ParagraphStyle(
-        'DocTitle', parent=styles['Heading1'], fontSize=18, textColor=colors.HexColor('#1E3A8A'), spaceAfter=12
+        'DocTitle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#1E3A8A'), spaceAfter=10
     )
     section_style = ParagraphStyle(
         'DocSection', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor('#1E40AF'), spaceBefore=10, spaceAfter=6
     )
     
-    story.append(Paragraph(f"<b>Sales & Dispatch Summary Report - {month_name}</b>", title_style))
+    story.append(Paragraph(f"<b>{section_title} Report — {sheet_name}</b>", title_style))
     story.append(Spacer(1, 10))
     
-    story.append(Paragraph("Key Performance Indicators (KPIs)", section_style))
-    kpi_data = [
-        ["Metric", "Value"],
-        ["Total PO Count", str(kpis['total_po'])],
-        ["Total DO Count", str(kpis['total_do'])],
-        ["Number of Parties", str(kpis['num_parties'])],
-        ["Total PO Quantity (MT)", f"{kpis['total_po_qty']:,.2f}"],
-        ["Total PO Amount (₹)", f"₹{kpis['total_amount']:,.2f}"],
-        ["Dispatched Quantity (MT)", f"{kpis['dispatched_qty']:,.2f}"],
-        ["Pending Quantity (MT)", f"{kpis['pending_qty']:,.2f}"]
-    ]
-    t_kpi = Table(kpi_data, colWidths=[220, 220])
-    t_kpi.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#3B82F6')),
-        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0,0), (-1,0), 6),
-        ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#F3F4F6')),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#D1D5DB')),
-    ]))
-    story.append(t_kpi)
-    story.append(Spacer(1, 15))
+    # Render KPIs if available
+    if kpis:
+        story.append(Paragraph("Key Metrics Summary", section_style))
+        kpi_data = [["Metric", "Value"]]
+        for k, v in kpis.items():
+            if isinstance(v, (int, np.integer)):
+                val_str = f"{v:,}"
+            elif isinstance(v, (float, np.floating)):
+                val_str = f"₹{v:,.2f}" if "Amount" in k else f"{v:,.2f}"
+            else:
+                val_str = str(v)
+            kpi_data.append([k, val_str])
+            
+        t_kpi = Table(kpi_data, colWidths=[220, 220])
+        t_kpi.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#3B82F6')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0,0), (-1,0), 5),
+            ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#F3F4F6')),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#D1D5DB')),
+        ]))
+        story.append(t_kpi)
+        story.append(Spacer(1, 15))
     
+    # Render Data Tables
     for title, df in tables_dict.items():
         if df is not None and not df.empty:
             story.append(Paragraph(f"<b>{title}</b>", section_style))
-            sub_df = df.head(15).reset_index()
+            sub_df = df.head(20).reset_index(drop=True)
             table_data = [sub_df.columns.tolist()] + sub_df.values.tolist()
             table_data = [[str(cell)[:25] for cell in row] for row in table_data]
             
-            t_data = Table(table_data)
+            col_width = 480 / max(len(sub_df.columns), 1)
+            t_data = Table(table_data, colWidths=[col_width]*len(sub_df.columns))
             t_data.setStyle(TableStyle([
                 ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#4B5563')),
                 ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
-                ('FONTSIZE', (0,0), (-1,-1), 8),
+                ('FONTSIZE', (0,0), (-1,-1), 7),
                 ('ALIGN', (0,0), (-1,-1), 'CENTER'),
                 ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
             ]))
@@ -219,13 +227,13 @@ def calculate_kpis(data):
     pending_qty = data['PENDING'].sum()
     
     return {
-        'total_po': total_po,
-        'total_do': total_do,
-        'num_parties': num_parties,
-        'total_po_qty': total_po_qty,
-        'total_amount': total_amount,
-        'dispatched_qty': dispatched_qty,
-        'pending_qty': pending_qty
+        'Overall PO Count': total_po,
+        'Overall DO Count': total_do,
+        'Number of Parties': num_parties,
+        'Total PO Quantity (MT)': total_po_qty,
+        'Total PO Amount': total_amount,
+        'Dispatched Qty (MT)': dispatched_qty,
+        'Pending Qty (MT)': pending_qty
     }
 
 # =========================================================
@@ -237,33 +245,33 @@ if section == "📈 KPI Overview":
     kpis = calculate_kpis(df)
     
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Overall PO Count", f"{kpis['total_po']:,}")
-    c2.metric("Overall DO Count", f"{kpis['total_do']:,}")
-    c3.metric("Number of Parties", f"{kpis['num_parties']:,}")
-    c4.metric("Total PO Qty (MT)", f"{kpis['total_po_qty']:,.2f}")
+    c1.metric("Overall PO Count", f"{kpis['Overall PO Count']:,}")
+    c2.metric("Overall DO Count", f"{kpis['Overall DO Count']:,}")
+    c3.metric("Number of Parties", f"{kpis['Number of Parties']:,}")
+    c4.metric("Total PO Qty (MT)", f"{kpis['Total PO Quantity (MT)']:,.2f}")
     
     c5, c6, c7 = st.columns(3)
-    c5.metric("Total Amount (PO Qty × Rate)", f"₹{kpis['total_amount']:,.2f}")
-    c6.metric("Sum of Dispatched Qty (MT)", f"{kpis['dispatched_qty']:,.2f}")
-    c7.metric("Sum of Pending Qty (MT)", f"{kpis['pending_qty']:,.2f}")
+    c5.metric("Total Amount (PO Qty × Rate)", f"₹{kpis['Total PO Amount']:,.2f}")
+    c6.metric("Sum of Dispatched Qty (MT)", f"{kpis['Dispatched Qty (MT)']:,.2f}")
+    c7.metric("Sum of Pending Qty (MT)", f"{kpis['Pending Qty (MT)']:,.2f}")
     
     st.markdown("---")
     st.subheader("Dispatched vs Pending Overview")
     
     fig_kpi = go.Figure(data=[go.Pie(
         labels=['Dispatched Qty', 'Pending Qty'],
-        values=[kpis['dispatched_qty'], kpis['pending_qty']],
+        values=[kpis['Dispatched Qty (MT)'], kpis['Pending Qty (MT)']],
         hole=.4,
         marker_colors=['#10B981', '#EF4444']
     )])
     st.plotly_chart(fig_kpi, use_container_width=True)
     
     st.markdown("---")
-    st.subheader("📊 Data Table View")
+    st.subheader("📊 Full Data Table View")
     st.dataframe(df, use_container_width=True)
     
     st.markdown("---")
-    st.subheader("📄 Export Report")
+    st.subheader("📄 Export KPI Overview PDF")
     
     sp_summary = df.groupby('SELLER NAME').agg(
         Ordered=('PO QTY (MT)', 'sum'),
@@ -271,13 +279,8 @@ if section == "📈 KPI Overview":
         Pending=('PENDING', 'sum')
     ).reset_index()
     
-    pdf_buffer = generate_pdf_report(selected_sheet, kpis, {"Sales Executive Performance": sp_summary})
-    st.download_button(
-        label="📥 Download Complete PDF Summary Report",
-        data=pdf_buffer,
-        file_name=f"Sales_Report_{selected_sheet}.pdf",
-        mime="application/pdf"
-    )
+    pdf_buf = generate_pdf_report("KPI Overview", selected_sheet, kpis, {"Sales Executive Performance": sp_summary})
+    st.download_button("📥 Download KPI Overview PDF", data=pdf_buf, file_name=f"KPI_Overview_{selected_sheet}.pdf", mime="application/pdf")
 
 # =========================================================
 # SECTION 2: SALES PERSON ANALYTICS
@@ -340,17 +343,31 @@ elif section == "👤 Sales Person Analytics":
         ).reset_index()
         st.dataframe(sc_summary, use_container_width=True)
     else:
+        sc_summary = pd.DataFrame()
         st.info("No Short Closed ('SC') orders detected in Remarks for this sheet.")
 
+    st.markdown("---")
+    st.subheader("📄 Export Sales Person Report PDF")
+    
+    tables_to_pdf = {
+        "Item-Wise Sales Person": sp_item_grp,
+        "Cancelled Orders": sp_cancelled,
+        "Pending Orders": sp_pending
+    }
+    if not sc_summary.empty:
+        tables_to_pdf["Short Closed Orders"] = sc_summary
+
+    pdf_buf = generate_pdf_report("Sales Person Analytics", selected_sheet, None, tables_to_pdf)
+    st.download_button("📥 Download Sales Person Report PDF", data=pdf_buf, file_name=f"Sales_Person_Analytics_{selected_sheet}.pdf", mime="application/pdf")
+
 # =========================================================
-# SECTION 3: MONTH WISE & DATE FILTER (USING PO DATE)
+# SECTION 3: MONTH WISE & DATE FILTER
 # =========================================================
 elif section == "📅 Month Wise & Date Filter":
     st.header("Date & Month Analytics (Based on PO Date)")
     
     mode = st.radio("Select View Mode", ["Single Date Filter", "Compare Month-Wise / Date-Wise"])
     
-    # Extract unique PO dates & formatted values
     po_dates_df = df.dropna(subset=['PO DATE']).copy()
     po_dates_df['PO_DATE_ONLY'] = po_dates_df['PO DATE'].dt.date
     unique_dates = sorted(po_dates_df['PO_DATE_ONLY'].unique())
@@ -360,7 +377,6 @@ elif section == "📅 Month Wise & Date Filter":
         st.stop()
 
     if mode == "Single Date Filter":
-        # Format dates as DD/MM/YYYY for selection dropdown
         date_options = [d.strftime('%d/%m/%Y') for d in unique_dates]
         selected_date_str = st.selectbox("Select PO Date (DD/MM/YYYY)", date_options)
         
@@ -368,16 +384,20 @@ elif section == "📅 Month Wise & Date Filter":
         filtered_df = df[df['PO DATE'].dt.date == selected_date]
         
         st.subheader(f"Details for PO Date: {selected_date_str}")
-        
         d_kpis = calculate_kpis(filtered_df)
+        
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("POs Received", d_kpis['total_po'])
-        c2.metric("Total Ordered Qty", f"{d_kpis['total_po_qty']:,.2f} MT")
-        c3.metric("Dispatched Qty", f"{d_kpis['dispatched_qty']:,.2f} MT")
-        c4.metric("Total Amount", f"₹{d_kpis['total_amount']:,.2f}")
+        c1.metric("POs Received", d_kpis['Overall PO Count'])
+        c2.metric("Total Ordered Qty", f"{d_kpis['Total PO Quantity (MT)']:,.2f} MT")
+        c3.metric("Dispatched Qty", f"{d_kpis['Dispatched Qty (MT)']:,.2f} MT")
+        c4.metric("Total Amount", f"₹{d_kpis['Total PO Amount']:,.2f}")
         
         st.dataframe(filtered_df, use_container_width=True)
         
+        st.markdown("---")
+        pdf_buf = generate_pdf_report(f"PO Date {selected_date_str}", selected_sheet, d_kpis, {"PO Details": filtered_df[['PO NO', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'PO QTY (MT)', 'DISP.QTY', 'PENDING']]})
+        st.download_button("📥 Download Date Details PDF", data=pdf_buf, file_name=f"Date_Report_{selected_date_str.replace('/', '-')}.pdf", mime="application/pdf")
+
     else:
         st.subheader("Compare Metrics (Month-Wise or Date-Wise)")
         comp_type = st.radio("Comparison Type", ["Date Wise", "Month Wise"], horizontal=True)
@@ -396,11 +416,9 @@ elif section == "📅 Month Wise & Date Filter":
             df1 = df[df['PO DATE'].dt.date == d1]
             df2 = df[df['PO DATE'].dt.date == d2]
             
-            label1 = date1_str
-            label2 = date2_str
+            label1, label2 = date1_str, date2_str
             
-        else: # Month Wise Comparison
-            # Gather all sheets or months available
+        else:
             col1, col2 = st.columns(2)
             with col1:
                 sheet1 = st.selectbox("Select First Month Sheet", sheet_names, index=0, key="m1")
@@ -410,34 +428,37 @@ elif section == "📅 Month Wise & Date Filter":
             df1 = load_and_clean_sheet(uploaded_file, sheet1)
             df2 = load_and_clean_sheet(uploaded_file, sheet2)
             
-            label1 = sheet1
-            label2 = sheet2
+            label1, label2 = sheet1, sheet2
             
         kpi1 = calculate_kpis(df1)
         kpi2 = calculate_kpis(df2)
         
         comp_df = pd.DataFrame({
             "Metric": ["Total PO Count", "Ordered Qty (MT)", "Dispatched Qty (MT)", "Pending Qty (MT)", "Total Amount (₹)", "Parties Count"],
-            f"{label1}": [kpi1['total_po'], kpi1['total_po_qty'], kpi1['dispatched_qty'], kpi1['pending_qty'], kpi1['total_amount'], kpi1['num_parties']],
-            f"{label2}": [kpi2['total_po'], kpi2['total_po_qty'], kpi2['dispatched_qty'], kpi2['pending_qty'], kpi2['total_amount'], kpi2['num_parties']],
+            f"{label1}": [kpi1['Overall PO Count'], kpi1['Total PO Quantity (MT)'], kpi1['Dispatched Qty (MT)'], kpi1['Pending Qty (MT)'], kpi1['Total PO Amount'], kpi1['Number of Parties']],
+            f"{label2}": [kpi2['Overall PO Count'], kpi2['Total PO Quantity (MT)'], kpi2['Dispatched Qty (MT)'], kpi2['Pending Qty (MT)'], kpi2['Total PO Amount'], kpi2['Number of Parties']],
             "Difference": [
-                kpi2['total_po'] - kpi1['total_po'],
-                kpi2['total_po_qty'] - kpi1['total_po_qty'],
-                kpi2['dispatched_qty'] - kpi1['dispatched_qty'],
-                kpi2['pending_qty'] - kpi1['pending_qty'],
-                kpi2['total_amount'] - kpi1['total_amount'],
-                kpi2['num_parties'] - kpi1['num_parties']
+                kpi2['Overall PO Count'] - kpi1['Overall PO Count'],
+                kpi2['Total PO Quantity (MT)'] - kpi1['Total PO Quantity (MT)'],
+                kpi2['Dispatched Qty (MT)'] - kpi1['Dispatched Qty (MT)'],
+                kpi2['Pending Qty (MT)'] - kpi1['Pending Qty (MT)'],
+                kpi2['Total PO Amount'] - kpi1['Total PO Amount'],
+                kpi2['Number of Parties'] - kpi1['Number of Parties']
             ]
         })
         
         st.table(comp_df)
         
         fig_comp = go.Figure(data=[
-            go.Bar(name=str(label1), x=["Ordered Qty", "Dispatched Qty", "Pending Qty"], y=[kpi1['total_po_qty'], kpi1['dispatched_qty'], kpi1['pending_qty']]),
-            go.Bar(name=str(label2), x=["Ordered Qty", "Dispatched Qty", "Pending Qty"], y=[kpi2['total_po_qty'], kpi2['dispatched_qty'], kpi2['pending_qty']])
+            go.Bar(name=str(label1), x=["Ordered Qty", "Dispatched Qty", "Pending Qty"], y=[kpi1['Total PO Quantity (MT)'], kpi1['Dispatched Qty (MT)'], kpi1['Pending Qty (MT)']]),
+            go.Bar(name=str(label2), x=["Ordered Qty", "Dispatched Qty", "Pending Qty"], y=[kpi2['Total PO Quantity (MT)'], kpi2['Dispatched Qty (MT)'], kpi2['Pending Qty (MT)']])
         ])
         fig_comp.update_layout(barmode='group', title=f"Comparison: {label1} vs {label2}")
         st.plotly_chart(fig_comp, use_container_width=True)
+        
+        st.markdown("---")
+        pdf_buf = generate_pdf_report(f"Comparison {label1} vs {label2}", selected_sheet, None, {"Comparison Summary": comp_df})
+        st.download_button("📥 Download Comparison Report PDF", data=pdf_buf, file_name=f"Comparison_Report_{label1}_vs_{label2}.pdf", mime="application/pdf")
 
 # =========================================================
 # SECTION 4: PARTY WISE REPORT
@@ -470,6 +491,10 @@ elif section == "🏢 Party Wise Report":
     )
     st.plotly_chart(fig_party, use_container_width=True)
 
+    st.markdown("---")
+    pdf_buf = generate_pdf_report("Party Wise Report", selected_sheet, None, {"Party Summary": party_grp})
+    st.download_button("📥 Download Party Wise Report PDF", data=pdf_buf, file_name=f"Party_Wise_Report_{selected_sheet}.pdf", mime="application/pdf")
+
 # =========================================================
 # SECTION 5: MATERIAL & WIDTH BREAKDOWN
 # =========================================================
@@ -498,3 +523,7 @@ elif section == "📐 Material & Width Breakdown":
         barmode='group'
     )
     st.plotly_chart(fig_width, use_container_width=True)
+
+    st.markdown("---")
+    pdf_buf = generate_pdf_report("Material & Width Breakdown", selected_sheet, None, {"Item and Width Breakdown": width_grp})
+    st.download_button("📥 Download Material Breakdown PDF", data=pdf_buf, file_name=f"Material_Width_Breakdown_{selected_sheet}.pdf", mime="application/pdf")
