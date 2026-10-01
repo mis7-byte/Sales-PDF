@@ -2,8 +2,12 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import re
+import warnings
 
-# Set page configuration as first Streamlit call
+# Suppress openpyxl date serial warnings for malformed Excel cells
+warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
+
+# Page Configuration
 st.set_page_config(page_title="Sales & Dispatch Analytics", layout="wide")
 
 # ---------------------------------------------------------
@@ -44,6 +48,7 @@ EXPECTED_COLUMNS = [
 ]
 
 def parse_size(size_val):
+    """Extract Width and Length from dimension string (e.g. 1500X6300 or 1500*6300)"""
     if pd.isna(size_val):
         return None, None
     size_str = str(size_val).upper().replace(" ", "").replace("*", "X")
@@ -56,27 +61,34 @@ def parse_size(size_val):
     return None, None
 
 def clean_data(df):
+    """Standardizes columns, fixes invalid dates, and derives key metrics."""
+    # Standardize column headers
     renamed_cols = {}
     for col in df.columns:
         clean_col = str(col).strip().upper()
         renamed_cols[col] = COLUMN_MAP.get(clean_col, clean_col)
     df = df.rename(columns=renamed_cols)
 
+    # Fill missing columns
     for col in EXPECTED_COLUMNS:
         if col not in df.columns:
             df[col] = None
 
-    df['PO_DATE'] = pd.to_datetime(df['PO_DATE'], errors='coerce')
-    df['DISPATCH_DATE'] = pd.to_datetime(df['DISPATCH_DATE'], errors='coerce')
+    # Robust Date Parsing (safely coerces invalid Excel serial numbers to NaT)
+    df['PO_DATE'] = pd.to_datetime(df['PO_DATE'], errors='coerce', format='mixed')
+    df['DISPATCH_DATE'] = pd.to_datetime(df['DISPATCH_DATE'], errors='coerce', format='mixed')
 
+    # Clean Numeric Columns
     num_cols = ['PO_QTY', 'PER_TON', 'DISP_QTY', 'PENDING_QTY', 'THICKNESS']
     for col in num_cols:
         df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0)
 
+    # Standardize Text Columns
     text_cols = ['PARTY_NAME', 'BROKER', 'SECTOR', 'PLACE', 'SELLER_NAME', 'ITEM', 'GRADE', 'STATUS', 'PO_NO', 'DO_NO']
     for col in text_cols:
         df[col] = df[col].astype(str).fillna("Unknown").str.strip()
 
+    # Derived Calculations
     df['TOTAL_REVENUE'] = df['PO_QTY'] * df['PER_TON']
     sizes = df['SIZE'].apply(parse_size)
     df['WIDTH'] = [s[0] for s in sizes]
@@ -114,26 +126,29 @@ def render_kpis_and_charts(df, title_prefix=""):
 
     st.subheader(f"📊 {title_prefix} KPI Overview")
     
-    kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5 = st.columns(5)
-    kpi_col1.metric("Unique POs", f"{df['PO_NO'].nunique():,}")
-    kpi_col2.metric("Unique DOs", f"{df['DO_NO'].nunique():,}")
-    kpi_col3.metric("Parties", f"{df['PARTY_NAME'].nunique():,}")
-    kpi_col4.metric("Brokers", f"{df['BROKER'].nunique():,}")
-    kpi_col5.metric("Sales Persons", f"{df['SELLER_NAME'].nunique():,}")
+    # Primary Metrics Row 1
+    k1, k2, k3, k4, k5 = st.columns(5)
+    k1.metric("Unique POs", f"{df['PO_NO'].nunique():,}")
+    k2.metric("Unique DOs", f"{df['DO_NO'].nunique():,}")
+    k3.metric("Parties", f"{df['PARTY_NAME'].nunique():,}")
+    k4.metric("Brokers", f"{df['BROKER'].nunique():,}")
+    k5.metric("Sales Persons", f"{df['SELLER_NAME'].nunique():,}")
 
-    kpi_col6, kpi_col7, kpi_col8, kpi_col9, kpi_col10 = st.columns(5)
-    kpi_col6.metric("Total PO Qty (MT)", f"{df['PO_QTY'].sum():,.2f}")
-    kpi_col7.metric("Dispatched Qty (MT)", f"{df['DISP_QTY'].sum():,.2f}")
-    kpi_col8.metric("Pending Qty (MT)", f"{df['PENDING_QTY'].sum():,.2f}")
-    kpi_col9.metric("Total Revenue (₹)", f"₹{df['TOTAL_REVENUE'].sum():,.2f}")
-    kpi_col10.metric("Sectors Served", f"{df['SECTOR'].nunique():,}")
+    # Primary Metrics Row 2
+    k6, k7, k8, k9, k10 = st.columns(5)
+    k6.metric("Total PO Qty (MT)", f"{df['PO_QTY'].sum():,.2f}")
+    k7.metric("Dispatched Qty (MT)", f"{df['DISP_QTY'].sum():,.2f}")
+    k8.metric("Pending Qty (MT)", f"{df['PENDING_QTY'].sum():,.2f}")
+    k9.metric("Total Revenue (₹)", f"₹{df['TOTAL_REVENUE'].sum():,.2f}")
+    k10.metric("Sectors Served", f"{df['SECTOR'].nunique():,}")
 
     st.divider()
 
     st.subheader("📈 Visual Analytics & Insights")
 
-    chart_c1, chart_c2 = st.columns(2)
-    with chart_c1:
+    # Chart Row 1
+    c1, c2 = st.columns(2)
+    with c1:
         seller_summary = df.groupby('SELLER_NAME')[['PO_QTY', 'DISP_QTY', 'PENDING_QTY']].sum().reset_index()
         fig_seller = px.bar(
             seller_summary,
@@ -143,7 +158,7 @@ def render_kpis_and_charts(df, title_prefix=""):
         )
         st.plotly_chart(fig_seller, use_container_width=True)
 
-    with chart_c2:
+    with c2:
         party_summary = df.groupby('PARTY_NAME')['PENDING_QTY'].sum().nlargest(10).reset_index()
         fig_party_pending = px.bar(
             party_summary,
@@ -153,15 +168,16 @@ def render_kpis_and_charts(df, title_prefix=""):
         )
         st.plotly_chart(fig_party_pending, use_container_width=True)
 
-    chart_c3, chart_c4 = st.columns(2)
-    with chart_c3:
+    # Chart Row 2
+    c3, c4 = st.columns(2)
+    with c3:
         fig_status = px.pie(
             df, names='STATUS', title="Order Status Distribution",
             hole=0.4, color_discrete_sequence=px.colors.qualitative.Pastel
         )
         st.plotly_chart(fig_status, use_container_width=True)
 
-    with chart_c4:
+    with c4:
         valid_sizes = df[df['WIDTH'].notnull() & df['LENGTH'].notnull()]
         if not valid_sizes.empty:
             fig_size = px.scatter(
@@ -173,7 +189,7 @@ def render_kpis_and_charts(df, title_prefix=""):
             )
             st.plotly_chart(fig_size, use_container_width=True)
         else:
-            st.info("No valid Width/Length size data available for scatter plot.")
+            st.info("No valid Width/Length dimension data found in 'SIZE' column.")
 
     st.subheader("📋 Detailed Data View")
     st.dataframe(df.drop(columns=['WIDTH', 'LENGTH'], errors='ignore'), use_container_width=True)
@@ -192,14 +208,16 @@ if uploaded_file is not None:
 
         main_tabs = st.tabs(["📅 Date Analytics & Comparison", "📜 Party Ordering History", "⏳ PENDING DISPATCH Sheet"])
 
+        # TAB 1: DATE ANALYTICS
         with main_tabs[0]:
             st.sidebar.header("Date Filter Settings")
             mode = st.sidebar.radio("Analysis Mode", ["Single Date Analysis", "Between Two Dates Comparison"])
 
+            # Filter valid non-NaT dates
             valid_dates = df_monthly['DISPATCH_DATE'].dropna()
-            
+
             if valid_dates.empty:
-                st.warning("No valid dispatch dates found in the uploaded monthly sheets.")
+                st.warning("No valid dispatch dates found in the uploaded file.")
             else:
                 min_date = valid_dates.min().date()
                 max_date = valid_dates.max().date()
@@ -241,6 +259,7 @@ if uploaded_file is not None:
                         st.metric("Total Revenue", f"₹{df_d2['TOTAL_REVENUE'].sum():,.2f}", delta=f"₹{diff_rev:,.2f}")
                         st.metric("Active Parties", df_d2['PARTY_NAME'].nunique(), delta=df_d2['PARTY_NAME'].nunique() - df_d1['PARTY_NAME'].nunique())
 
+        # TAB 2: PARTY HISTORY
         with main_tabs[1]:
             st.header("🏢 Party Ordering Lifecycle & Recency Analytics")
             
@@ -265,6 +284,7 @@ if uploaded_file is not None:
             else:
                 st.info("No data available in monthly sheets.")
 
+        # TAB 3: PENDING DISPATCH
         with main_tabs[2]:
             st.header("⏳ Dedicated Pending Dispatch Report")
             if not df_pending.empty:
@@ -273,7 +293,7 @@ if uploaded_file is not None:
                 st.info("No 'PENDING DISPATCH' sheet found in the uploaded file or the sheet contains no records.")
 
     except Exception as e:
-        st.error(f"An error occurred while processing the file: {str(e)}")
+        st.error(f"An error occurred while parsing the file: {str(e)}")
 
 else:
     st.info("👈 Upload an Excel workbook using the sidebar to generate reports.")
