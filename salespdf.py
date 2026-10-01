@@ -19,6 +19,26 @@ st.set_page_config(
     layout="wide"
 )
 
+# Custom CSS & JavaScript to capture exact screen layout for PDF print/download
+st.markdown("""
+    <style>
+    @media print {
+        /* Hide sidebar, buttons, and navigation during print/pdf export */
+        section[data-testid="stSidebar"], .stButton, header, footer, iframe {
+            display: none !important;
+        }
+        .main .block-container {
+            max-width: 100% !important;
+            padding: 0 !important;
+            margin: 0 !important;
+        }
+        body {
+            background-color: white !important;
+        }
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 st.title("📊 Sales & Dispatch Analytics Dashboard")
 
 # ---------------------------------------------------------
@@ -88,7 +108,7 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         if std_col not in df.columns:
             df[std_col] = np.nan
 
-    # Datetime conversions (Day-first + dot replacement)
+    # Datetime conversions (Day-first + dot replacement e.g. 01.09.2026 -> 01/09/2026)
     if 'PO DATE' in df.columns:
         po_date_clean = df['PO DATE'].astype(str).str.replace('.', '/', regex=False)
         df['PO DATE'] = pd.to_datetime(po_date_clean, dayfirst=True, errors='coerce')
@@ -105,17 +125,16 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         
     df['AMOUNT'] = df['PO QTY (MT)'] * df['PER TON']
     
-    # Identify Cancelled items from STATUS and REMARK
     str_cols = ['PARTY NAME', 'SELLER NAME', 'ITEM', 'STATUS', 'REMARK', 'BROKER', 'SECTOR', 'PLACE', 'PO NO', 'DO NO']
     for c in str_cols:
         df[c] = df[c].fillna('Unknown').astype(str).str.strip()
 
+    # Cancelled order identification
     df['IS_CANCELLED'] = df['STATUS'].str.lower().str.contains('cancel') | df['REMARK'].str.lower().str.contains('cancel')
-    
-    # Calculate Cancelled Qty and Adjust Active Pending Qty
     df['CANCELLED_QTY'] = np.where(df['IS_CANCELLED'], df['PO QTY (MT)'], 0.0)
     df['ACTIVE_PENDING_QTY'] = np.where(df['IS_CANCELLED'], 0.0, df['PENDING'])
 
+    # Parse Width from dimensions (e.g. 1500X6300 -> 1500)
     def parse_width(size_val):
         if pd.isna(size_val):
             return "N/A"
@@ -197,13 +216,13 @@ def generate_pdf_report(section_title, sheet_name, kpis, tables_dict):
     return buffer
 
 # ---------------------------------------------------------
-# Sidebar Controls & File Upload
+# Sidebar Controls & Navigation
 # ---------------------------------------------------------
 st.sidebar.title("📌 Navigation & Controls")
 uploaded_file = st.sidebar.file_uploader("Upload Excel File", type=["xlsx", "xls"])
 
 if uploaded_file is None:
-    st.info("👈 Please upload an Excel workbook from the left sidebar to start.")
+    st.info("👈 Please upload an Excel workbook from the left sidebar to view dashboard metrics.")
     st.stop()
 
 xl = pd.ExcelFile(uploaded_file)
@@ -272,15 +291,6 @@ if section == "📅 Month Wise & Date Filter":
         c4.metric("Total Amount", f"₹{d_kpis['Total PO Amount']:,.2f}")
         
         st.dataframe(filtered_df, use_container_width=True)
-        
-        st.markdown("---")
-        pdf_buf = generate_pdf_report(
-            f"PO Date {selected_date_str}", 
-            selected_sheet, 
-            d_kpis, 
-            {"PO Details": filtered_df[['PO NO', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'PO QTY (MT)', 'DISP.QTY', 'CANCELLED_QTY', 'ACTIVE_PENDING_QTY']]}
-        )
-        st.download_button("📥 Download Single Date Report PDF", data=pdf_buf, file_name=f"Date_Report_{selected_date_str.replace('/', '-')}.pdf", mime="application/pdf")
 
     else:
         st.subheader("Compare Performance")
@@ -299,7 +309,6 @@ if section == "📅 Month Wise & Date Filter":
             
             df1 = df[df['PO DATE'].dt.date == d1]
             df2 = df[df['PO DATE'].dt.date == d2]
-            
             label1, label2 = date1_str, date2_str
             
         else:
@@ -311,7 +320,6 @@ if section == "📅 Month Wise & Date Filter":
                 
             df1 = load_and_clean_sheet(uploaded_file, sheet1)
             df2 = load_and_clean_sheet(uploaded_file, sheet2)
-            
             label1, label2 = sheet1, sheet2
             
         kpi1 = calculate_kpis(df1)
@@ -335,15 +343,23 @@ if section == "📅 Month Wise & Date Filter":
         st.table(comp_df)
         
         fig_comp = go.Figure(data=[
-            go.Bar(name=str(label1), x=["Ordered Qty", "Dispatched Qty", "Cancelled Qty", "Pending Qty"], y=[kpi1['Total PO Quantity (MT)'], kpi1['Dispatched Qty (MT)'], kpi1['Cancelled Qty (MT)'], kpi1['Pending Qty (MT)']]),
-            go.Bar(name=str(label2), x=["Ordered Qty", "Dispatched Qty", "Cancelled Qty", "Pending Qty"], y=[kpi2['Total PO Quantity (MT)'], kpi2['Dispatched Qty (MT)'], kpi2['Cancelled Qty (MT)'], kpi2['Pending Qty (MT)']])
+            go.Bar(
+                name=str(label1), 
+                x=["Ordered Qty", "Dispatched Qty", "Cancelled Qty", "Pending Qty"], 
+                y=[kpi1['Total PO Quantity (MT)'], kpi1['Dispatched Qty (MT)'], kpi1['Cancelled Qty (MT)'], kpi1['Pending Qty (MT)']], 
+                text=[f"{kpi1['Total PO Quantity (MT)']:,.1f}", f"{kpi1['Dispatched Qty (MT)']:,.1f}", f"{kpi1['Cancelled Qty (MT)']:,.1f}", f"{kpi1['Pending Qty (MT)']:,.1f}"], 
+                textposition='outside'
+            ),
+            go.Bar(
+                name=str(label2), 
+                x=["Ordered Qty", "Dispatched Qty", "Cancelled Qty", "Pending Qty"], 
+                y=[kpi2['Total PO Quantity (MT)'], kpi2['Dispatched Qty (MT)'], kpi2['Cancelled Qty (MT)'], kpi2['Pending Qty (MT)']], 
+                text=[f"{kpi2['Total PO Quantity (MT)']:,.1f}", f"{kpi2['Dispatched Qty (MT)']:,.1f}", f"{kpi2['Cancelled Qty (MT)']:,.1f}", f"{kpi2['Pending Qty (MT)']:,.1f}"], 
+                textposition='outside'
+            )
         ])
         fig_comp.update_layout(barmode='group', title=f"Comparison: {label1} vs {label2}")
         st.plotly_chart(fig_comp, use_container_width=True)
-        
-        st.markdown("---")
-        pdf_buf = generate_pdf_report(f"Comparison {label1} vs {label2}", selected_sheet, None, {"Comparison Summary": comp_df})
-        st.download_button("📥 Download Comparison Report PDF", data=pdf_buf, file_name=f"Comparison_Report_{label1}_vs_{label2}.pdf", mime="application/pdf")
 
 # =========================================================
 # SECTION 2: ALL SALES & DISPATCH ANALYTICS
@@ -352,8 +368,16 @@ elif section == "📊 All Sales & Dispatch Analytics":
     selected_sheet = st.sidebar.selectbox("Select Month / Sheet", sheet_names)
     df = load_and_clean_sheet(uploaded_file, selected_sheet)
     
-    st.header(f"All Sales & Dispatch Analytics — {selected_sheet}")
-    
+    col_head, col_btn = st.columns([3, 1])
+    with col_head:
+        st.header(f"All Sales & Dispatch Analytics — {selected_sheet}")
+    with col_btn:
+        st.components.v1.html("""
+            <button onclick="window.parent.print()" style="background-color: #1E40AF; color: white; border: none; padding: 10px 16px; font-size: 14px; border-radius: 6px; cursor: pointer; margin-top: 10px; width: 100%;">
+                🖨️ Print Screen to PDF
+            </button>
+        """, height=50)
+
     # ---------------- 1. KPI OVERVIEW ----------------
     st.subheader("1. Key Performance Indicators (KPIs)")
     kpis = calculate_kpis(df)
@@ -370,14 +394,16 @@ elif section == "📊 All Sales & Dispatch Analytics":
     c7.metric("Sum of Cancelled Qty (MT)", f"{kpis['Cancelled Qty (MT)']:,.2f}")
     c8.metric("Sum of Active Pending Qty (MT)", f"{kpis['Pending Qty (MT)']:,.2f}")
     
-    # Donut Chart with All 3 Statuses (Dispatched, Cancelled, Pending)
+    # Donut Chart with Data Labels
     fig_kpi = go.Figure(data=[go.Pie(
         labels=['Dispatched Qty', 'Cancelled Qty', 'Pending Qty'],
         values=[kpis['Dispatched Qty (MT)'], kpis['Cancelled Qty (MT)'], kpis['Pending Qty (MT)']],
         hole=.4,
+        textinfo='label+value+percent',
+        texttemplate='%{label}<br>%{value:,.2f} MT (%{percent})',
         marker_colors=['#10B981', '#F59E0B', '#EF4444']
     )])
-    fig_kpi.update_layout(title="Status Breakdown (Dispatched vs Cancelled vs Pending)")
+    fig_kpi.update_layout(title="Overall Status Breakdown (with Data Labels)")
     st.plotly_chart(fig_kpi, use_container_width=True)
     
     st.markdown("---")
@@ -414,12 +440,28 @@ elif section == "📊 All Sales & Dispatch Analytics":
     col_c, col_d = st.columns(2)
     with col_c:
         sp_disp = df.groupby('SELLER NAME')['DISP.QTY'].sum().reset_index()
-        fig_disp = px.bar(sp_disp, x='SELLER NAME', y='DISP.QTY', title="Dispatched Qty by Sales Person", color_discrete_sequence=['#10B981'])
+        fig_disp = px.bar(
+            sp_disp, 
+            x='SELLER NAME', 
+            y='DISP.QTY', 
+            title="Dispatched Qty by Sales Person", 
+            text_auto=',.1f',
+            color_discrete_sequence=['#10B981']
+        )
+        fig_disp.update_traces(textposition='outside')
         st.plotly_chart(fig_disp, use_container_width=True)
         
     with col_d:
         sp_rec = df.groupby('SELLER NAME')['PO QTY (MT)'].sum().reset_index()
-        fig_rec = px.bar(sp_rec, x='SELLER NAME', y='PO QTY (MT)', title="Order Received Qty by Sales Person", color_discrete_sequence=['#3B82F6'])
+        fig_rec = px.bar(
+            sp_rec, 
+            x='SELLER NAME', 
+            y='PO QTY (MT)', 
+            title="Order Received Qty by Sales Person", 
+            text_auto=',.1f',
+            color_discrete_sequence=['#3B82F6']
+        )
+        fig_rec.update_traces(textposition='outside')
         st.plotly_chart(fig_rec, use_container_width=True)
 
     st.write("**Short Closed Orders (Remarks with 'SC')**")
@@ -428,7 +470,6 @@ elif section == "📊 All Sales & Dispatch Analytics":
         sc_summary = sc_df.groupby(['SELLER NAME', 'PARTY NAME', 'PO NO', 'REMARK']).agg(ShortClosedQty=('PENDING', 'sum')).reset_index()
         st.dataframe(sc_summary, use_container_width=True)
     else:
-        sc_summary = pd.DataFrame()
         st.info("No Short Closed ('SC') orders found.")
 
     st.markdown("---")
@@ -450,12 +491,14 @@ elif section == "📊 All Sales & Dispatch Analytics":
     st.dataframe(filtered_party_grp, use_container_width=True)
     
     fig_party = px.bar(
-        filtered_party_grp.head(20), 
+        filtered_party_grp.head(15), 
         x='PARTY NAME', 
         y=['OrderedQty', 'DispatchedQty', 'CancelledQty', 'PendingQty'],
         title="Top Parties - Ordered vs Dispatched vs Cancelled vs Pending",
-        barmode='group'
+        barmode='group',
+        text_auto=',.1f'
     )
+    fig_party.update_traces(textposition='outside')
     st.plotly_chart(fig_party, use_container_width=True)
 
     st.markdown("---")
@@ -476,21 +519,11 @@ elif section == "📊 All Sales & Dispatch Analytics":
         y=['OrderedQty', 'DispatchedQty', 'CancelledQty', 'PendingQty'], 
         color='ITEM',
         title="Qty Breakdown by Width and Item",
-        barmode='group'
+        barmode='group',
+        text_auto=',.1f'
     )
+    fig_width.update_traces(textposition='outside')
     st.plotly_chart(fig_width, use_container_width=True)
-
-    st.markdown("---")
-    st.subheader("📄 Export Master Analytics PDF")
-    
-    tables_to_pdf = {
-        "Sales Executive Performance": sp_item_grp,
-        "Party Wise Summary": party_grp.head(20),
-        "Material & Width Breakdown": width_grp
-    }
-    
-    pdf_buf = generate_pdf_report("Complete Sales & Dispatch Analytics", selected_sheet, kpis, tables_to_pdf)
-    st.download_button("📥 Download Full Analytics PDF Report", data=pdf_buf, file_name=f"Master_Analytics_{selected_sheet}.pdf", mime="application/pdf")
 
 # =========================================================
 # SECTION 3: PENDING DISPATCH
@@ -504,8 +537,6 @@ elif section == "🚚 Pending Dispatch":
     pd_sheet = st.sidebar.selectbox("Select Pending Dispatch Sheet", sheet_names, index=sheet_names.index(target_pd_sheet) if target_pd_sheet in sheet_names else 0)
     
     df_pd = load_and_clean_sheet(uploaded_file, pd_sheet)
-    
-    # Filter out cancelled orders from pending dispatch view
     active_pd = df_pd[(df_pd['ACTIVE_PENDING_QTY'] > 0) & (~df_pd['IS_CANCELLED'])]
     
     pd_kpis = {
@@ -529,8 +560,10 @@ elif section == "🚚 Pending Dispatch":
         x='SELLER NAME',
         y='ACTIVE_PENDING_QTY',
         title="Pending Dispatch Qty (MT) by Sales Person",
+        text_auto=',.1f',
         color_discrete_sequence=['#EF4444']
     )
+    fig_pd.update_traces(textposition='outside')
     st.plotly_chart(fig_pd, use_container_width=True)
     
     st.markdown("---")
@@ -539,19 +572,3 @@ elif section == "🚚 Pending Dispatch":
     pending_details_df = active_pd[['PO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']]
     pending_details_df.rename(columns={'ACTIVE_PENDING_QTY': 'PENDING QTY'}, inplace=True)
     st.dataframe(pending_details_df, use_container_width=True)
-    
-    st.markdown("---")
-    st.subheader("📄 Download Pending Dispatch Report")
-    
-    pdf_buf = generate_pdf_report(
-        "Pending Dispatch Summary",
-        pd_sheet,
-        pd_kpis,
-        {"Pending Dispatch Details": pending_details_df}
-    )
-    st.download_button(
-        "📥 Download Pending Dispatch Report PDF",
-        data=pdf_buf,
-        file_name=f"Pending_Dispatch_Report_{pd_sheet}.pdf",
-        mime="application/pdf"
-    )
