@@ -4,7 +4,7 @@ import plotly.express as px
 import re
 import warnings
 
-# Suppress openpyxl date serial warnings for malformed Excel cells
+# Suppress openpyxl warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
 # Page Configuration
@@ -27,7 +27,7 @@ COLUMN_MAP = {
     'THIKNESS': 'THICKNESS', 'THICKNESS': 'THICKNESS',
     'SIZE': 'SIZE', 'SIZE (MM)': 'SIZE',
     'GRADE': 'GRADE',
-    'PO QTY (MT)': 'PO_QTY', 'PO QTY': 'PO_QTY',
+    'PO QTY (MT)': 'PO_QTY', 'PO QTY': 'PO_QTY', 'QTY': 'PO_QTY', 'QUANTITY': 'PO_QTY',
     'PER TON': 'PER_TON', 'RATE PER TON': 'PER_TON', 'RATE': 'PER_TON',
     'INV NO.': 'INV_NO', 'INV NO': 'INV_NO', 'INVOICE NO': 'INV_NO',
     'DATE': 'DISPATCH_DATE', 'DISPATCH DATE': 'DISPATCH_DATE',
@@ -37,7 +37,8 @@ COLUMN_MAP = {
     'DISP. TH.': 'DISPATCH_THROUGH', 'DISPATCH THROUGH': 'DISPATCH_THROUGH',
     'STATUS': 'STATUS',
     'REMARK': 'REMARK', 'REMARKS': 'REMARK',
-    'MOBILE NO': 'MOBILE_NO', 'MOB NO.': 'MOBILE_NO', 'MOBILE': 'MOBILE_NO'
+    'MOBILE NO': 'MOBILE_NO', 'MOB NO.': 'MOBILE_NO', 'MOBILE': 'MOBILE_NO',
+    'PCS': 'PIECES', 'NO OF PCS': 'PIECES'
 }
 
 EXPECTED_COLUMNS = [
@@ -48,7 +49,7 @@ EXPECTED_COLUMNS = [
 ]
 
 def parse_size(size_val):
-    """Extract Width and Length from dimension string (e.g. 1500X6300 or 1500*6300)"""
+    """Extract Width and Length from string like 1250X6300 or 1250*6300"""
     if pd.isna(size_val):
         return None, None
     size_str = str(size_val).upper().replace(" ", "").replace("*", "X")
@@ -60,30 +61,41 @@ def parse_size(size_val):
             return None, None
     return None, None
 
+def safe_convert_date(series):
+    """Converts date series safely, coercing invalid years (<2000 or >2099) to NaT."""
+    clean_series = series.astype(str).str.strip()
+    parsed_dates = pd.to_datetime(clean_series, errors='coerce', format='mixed')
+    valid_mask = parsed_dates.dt.year.between(2000, 2099, na=False)
+    return parsed_dates.where(valid_mask, pd.NaT)
+
+def clean_numeric(series):
+    """Strips text like 'MT', 'PCS', 'TONS', commas, and converts to float."""
+    clean_s = series.astype(str).str.upper()
+    clean_s = clean_s.str.replace(r'[^\d\.\-]', '', regex=True).str.strip()
+    return pd.to_numeric(clean_s, errors='coerce').fillna(0)
+
 def clean_data(df):
-    """Standardizes columns, fixes invalid dates, and derives key metrics."""
-    # Standardize column headers
+    """Standardizes column mapping, handles units in numbers, and fixes date issues."""
     renamed_cols = {}
     for col in df.columns:
         clean_col = str(col).strip().upper()
         renamed_cols[col] = COLUMN_MAP.get(clean_col, clean_col)
     df = df.rename(columns=renamed_cols)
 
-    # Fill missing columns
     for col in EXPECTED_COLUMNS:
         if col not in df.columns:
             df[col] = None
 
-    # Robust Date Parsing (safely coerces invalid Excel serial numbers to NaT)
-    df['PO_DATE'] = pd.to_datetime(df['PO_DATE'], errors='coerce', format='mixed')
-    df['DISPATCH_DATE'] = pd.to_datetime(df['DISPATCH_DATE'], errors='coerce', format='mixed')
+    # Safe Date parsing
+    df['PO_DATE'] = safe_convert_date(df['PO_DATE'])
+    df['DISPATCH_DATE'] = safe_convert_date(df['DISPATCH_DATE'])
 
-    # Clean Numeric Columns
+    # Clean numbers with text (e.g. '0.927 MT' -> 0.927)
     num_cols = ['PO_QTY', 'PER_TON', 'DISP_QTY', 'PENDING_QTY', 'THICKNESS']
     for col in num_cols:
-        df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0)
+        df[col] = clean_numeric(df[col])
 
-    # Standardize Text Columns
+    # Clean text columns
     text_cols = ['PARTY_NAME', 'BROKER', 'SECTOR', 'PLACE', 'SELLER_NAME', 'ITEM', 'GRADE', 'STATUS', 'PO_NO', 'DO_NO']
     for col in text_cols:
         df[col] = df[col].astype(str).fillna("Unknown").str.strip()
@@ -104,16 +116,24 @@ def load_excel_data(uploaded_file):
     monthly_dfs = []
     pending_df = pd.DataFrame()
 
+    # Match sheet names like "APRIL - 2023", "MAY-2023", "SEP 2026", "SEPTEMBER 2023"
+    month_regex = re.compile(
+        r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC|JANUARY|FEBRUARY|MARCH|APRIL|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)',
+        re.IGNORECASE
+    )
+
     for sheet in sheet_names:
+        sheet_clean = sheet.strip().upper()
         df_sheet = excel_file.parse(sheet)
-        if sheet.strip().upper() == "PENDING DISPATCH":
+
+        if "PENDING DISPATCH" in sheet_clean or "PENDING" in sheet_clean:
             pending_df = clean_data(df_sheet)
-        else:
+        elif month_regex.search(sheet_clean):
             cleaned = clean_data(df_sheet)
             cleaned['SHEET_NAME'] = sheet
             monthly_dfs.append(cleaned)
 
-    combined_monthly = pd.concat(monthly_dfs, ignore_index=True) if monthly_dfs else pd.DataFrame()
+    combined_monthly = pd.concat(monthly_dfs, ignore_ignore_index=True) if monthly_dfs else pd.DataFrame()
     return combined_monthly, pending_df
 
 # ---------------------------------------------------------
@@ -126,7 +146,6 @@ def render_kpis_and_charts(df, title_prefix=""):
 
     st.subheader(f"📊 {title_prefix} KPI Overview")
     
-    # Primary Metrics Row 1
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric("Unique POs", f"{df['PO_NO'].nunique():,}")
     k2.metric("Unique DOs", f"{df['DO_NO'].nunique():,}")
@@ -134,7 +153,6 @@ def render_kpis_and_charts(df, title_prefix=""):
     k4.metric("Brokers", f"{df['BROKER'].nunique():,}")
     k5.metric("Sales Persons", f"{df['SELLER_NAME'].nunique():,}")
 
-    # Primary Metrics Row 2
     k6, k7, k8, k9, k10 = st.columns(5)
     k6.metric("Total PO Qty (MT)", f"{df['PO_QTY'].sum():,.2f}")
     k7.metric("Dispatched Qty (MT)", f"{df['DISP_QTY'].sum():,.2f}")
@@ -146,7 +164,6 @@ def render_kpis_and_charts(df, title_prefix=""):
 
     st.subheader("📈 Visual Analytics & Insights")
 
-    # Chart Row 1
     c1, c2 = st.columns(2)
     with c1:
         seller_summary = df.groupby('SELLER_NAME')[['PO_QTY', 'DISP_QTY', 'PENDING_QTY']].sum().reset_index()
@@ -168,7 +185,6 @@ def render_kpis_and_charts(df, title_prefix=""):
         )
         st.plotly_chart(fig_party_pending, use_container_width=True)
 
-    # Chart Row 2
     c3, c4 = st.columns(2)
     with c3:
         fig_status = px.pie(
@@ -189,10 +205,10 @@ def render_kpis_and_charts(df, title_prefix=""):
             )
             st.plotly_chart(fig_size, use_container_width=True)
         else:
-            st.info("No valid Width/Length dimension data found in 'SIZE' column.")
+            st.info("No valid Width/Length dimensions found.")
 
     st.subheader("📋 Detailed Data View")
-    st.dataframe(df.drop(columns=['WIDTH', 'LENGTH'], errors='ignore'), use_container_width=True)
+    st.dataframe(df.drop(columns=['WIDTH', 'LENGTH', 'PIECES'], errors='ignore'), use_container_width=True)
 
 
 # ---------------------------------------------------------
@@ -208,12 +224,10 @@ if uploaded_file is not None:
 
         main_tabs = st.tabs(["📅 Date Analytics & Comparison", "📜 Party Ordering History", "⏳ PENDING DISPATCH Sheet"])
 
-        # TAB 1: DATE ANALYTICS
         with main_tabs[0]:
             st.sidebar.header("Date Filter Settings")
             mode = st.sidebar.radio("Analysis Mode", ["Single Date Analysis", "Between Two Dates Comparison"])
 
-            # Filter valid non-NaT dates
             valid_dates = df_monthly['DISPATCH_DATE'].dropna()
 
             if valid_dates.empty:
@@ -259,7 +273,6 @@ if uploaded_file is not None:
                         st.metric("Total Revenue", f"₹{df_d2['TOTAL_REVENUE'].sum():,.2f}", delta=f"₹{diff_rev:,.2f}")
                         st.metric("Active Parties", df_d2['PARTY_NAME'].nunique(), delta=df_d2['PARTY_NAME'].nunique() - df_d1['PARTY_NAME'].nunique())
 
-        # TAB 2: PARTY HISTORY
         with main_tabs[1]:
             st.header("🏢 Party Ordering Lifecycle & Recency Analytics")
             
@@ -284,7 +297,6 @@ if uploaded_file is not None:
             else:
                 st.info("No data available in monthly sheets.")
 
-        # TAB 3: PENDING DISPATCH
         with main_tabs[2]:
             st.header("⏳ Dedicated Pending Dispatch Report")
             if not df_pending.empty:
