@@ -17,9 +17,9 @@ st.set_page_config(page_title="Sales & Dispatch Analytics", layout="wide")
 # 1. COLUMN MAPPING & CLEANING UTILITIES
 # ---------------------------------------------------------
 COLUMN_MAP = {
-    'S_NO': 'S_NO', 'SR NO': 'S_NO', 'S.NO': 'S_NO', 'S. NO.': 'S_NO',
+    'S_NO': 'S_NO', 'SR NO': 'S_NO', 'S.NO': 'S_NO', 'S. NO.': 'S_NO', 'SIR NO.': 'S_NO', 'SR NO.': 'S_NO',
     'PO NO': 'PO_NO', 'PO NO.': 'PO_NO', 'PO NUMBER': 'PO_NO',
-    'DO .NO.': 'DO_NO', 'DO NO': 'DO_NO', 'DO NO.': 'DO_NO', 'DO .NO': 'DO_NO',
+    'DO .NO.': 'DO_NO', 'DO NO': 'DO_NO', 'DO NO.': 'DO_NO', 'DO .NO': 'DO_NO', 'DO NO ': 'DO_NO',
     'PO DATE': 'PO_DATE', 'ORDER DATE': 'PO_DATE',
     'PARTY NAME': 'PARTY_NAME', 'CUSTOMER NAME': 'PARTY_NAME',
     'BROKER': 'BROKER',
@@ -28,7 +28,7 @@ COLUMN_MAP = {
     'SELLER NAME': 'SELLER_NAME', 'SALES PERSON': 'SELLER_NAME',
     'ITEM': 'ITEM', 'DISCRIPTION': 'ITEM', 'DESCRIPTION': 'ITEM',
     'THIKNESS': 'THICKNESS', 'THICKNESS': 'THICKNESS',
-    'SIZE': 'SIZE', 'SIZE (MM)': 'SIZE',
+    'SIZE': 'SIZE', 'SIZE (MM)': 'SIZE', 'SIZE ()': 'SIZE',
     'GRADE': 'GRADE',
     'PO QTY (MT)': 'PO_QTY', 'PO QTY': 'PO_QTY', 'QTY': 'PO_QTY', 'QUANTITY': 'PO_QTY',
     'PER TON': 'PER_TON', 'RATE PER TON': 'PER_TON', 'RATE': 'PER_TON',
@@ -52,7 +52,6 @@ EXPECTED_COLUMNS = [
 ]
 
 def parse_size(size_val):
-    """Extracts Width and Length from strings like 1500X6300 or 1500*6300."""
     if pd.isna(size_val):
         return None, None
     size_str = str(size_val).upper().replace(" ", "").replace("*", "X")
@@ -65,45 +64,54 @@ def parse_size(size_val):
     return None, None
 
 def safe_convert_date(series):
-    """Converts date series safely, coercing invalid years (<2000 or >2099) to NaT."""
     clean_series = series.astype(str).str.strip()
-    parsed_dates = pd.to_datetime(clean_series, errors='coerce', format='mixed')
-    
+    parsed_dates = pd.to_datetime(clean_series, errors='coerce', dayfirst=True, format='mixed')
     years = parsed_dates.dt.year
-    valid_mask = (years >= 2000) & (years <= 2099)
+    valid_mask = (years >= 2020) & (years <= 2035)
     valid_mask = valid_mask.fillna(False)
-    
     return parsed_dates.where(valid_mask, pd.NaT)
 
 def clean_numeric(series):
-    """Strips text units ('MT', 'PCS', 'TONS'), commas, and converts to float."""
     clean_s = series.astype(str).str.upper()
     clean_s = clean_s.str.replace(r'[^\d\.\-]', '', regex=True).str.strip()
     return pd.to_numeric(clean_s, errors='coerce').fillna(0)
 
+def locate_header_and_read(excel_file, sheet_name):
+    """Dynamic header row finder to handle title banners in Excel sheets."""
+    df_raw = excel_file.parse(sheet_name, header=None).dropna(how='all')
+    header_row_idx = None
+    
+    for idx, row in df_raw.iterrows():
+        row_str = ' '.join(row.dropna().astype(str)).upper()
+        if 'PARTY NAME' in row_str or ('PO NO' in row_str and 'DO' in row_str):
+            header_row_idx = idx
+            break
+            
+    if header_row_idx is not None:
+        headers = df_raw.loc[header_row_idx].values
+        df_data = df_raw.loc[header_row_idx + 1:].copy()
+        df_data.columns = [str(h).strip().upper() if pd.notna(h) else f"UNNAMED_{i}" for i, h in enumerate(headers)]
+        return df_data
+    return pd.DataFrame()
+
 def clean_data(df):
-    """Standardizes column mapping, cleans units, handles text/dates, and derives metrics."""
     renamed_cols = {}
     for col in df.columns:
         clean_col = str(col).strip().upper()
         renamed_cols[col] = COLUMN_MAP.get(clean_col, clean_col)
     df = df.rename(columns=renamed_cols)
 
-    # Ensure missing columns exist
     for col in EXPECTED_COLUMNS:
         if col not in df.columns:
             df[col] = None
 
-    # Safe Date parsing
     df['PO_DATE'] = safe_convert_date(df['PO_DATE'])
     df['DISPATCH_DATE'] = safe_convert_date(df['DISPATCH_DATE'])
 
-    # Clean numbers with embedded units
     num_cols = ['PO_QTY', 'PER_TON', 'DISP_QTY', 'PENDING_QTY', 'THICKNESS']
     for col in num_cols:
         df[col] = clean_numeric(df[col])
 
-    # Clean text columns
     text_cols = [
         'PARTY_NAME', 'BROKER', 'SECTOR', 'PLACE', 'SELLER_NAME', 
         'ITEM', 'GRADE', 'STATUS', 'PO_NO', 'DO_NO', 'PAYMENT_TERMS', 
@@ -112,7 +120,6 @@ def clean_data(df):
     for col in text_cols:
         df[col] = df[col].astype(str).replace(['nan', 'None', 'NAT', 'N/A', ''], 'Unknown').str.strip()
 
-    # Derived Calculations
     df['TOTAL_REVENUE'] = df['PO_QTY'] * df['PER_TON']
     sizes = df['SIZE'].apply(parse_size)
     df['WIDTH'] = [s[0] for s in sizes]
@@ -122,7 +129,6 @@ def clean_data(df):
 
 @st.cache_data(show_spinner=False)
 def load_excel_data(file_bytes):
-    """Memory-efficient loader reading Excel bytes directly."""
     file_obj = io.BytesIO(file_bytes)
     excel_file = pd.ExcelFile(file_obj, engine='openpyxl')
     sheet_names = excel_file.sheet_names
@@ -130,7 +136,6 @@ def load_excel_data(file_bytes):
     monthly_dfs = []
     pending_df = pd.DataFrame()
 
-    # Matches monthly sheets (e.g. "SEP 2026", "AUG 2026", "APRIL - 2023")
     month_regex = re.compile(
         r'(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC|JANUARY|FEBRUARY|MARCH|APRIL|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)',
         re.IGNORECASE
@@ -138,7 +143,7 @@ def load_excel_data(file_bytes):
 
     for sheet in sheet_names:
         sheet_clean = sheet.strip().upper()
-        df_sheet = excel_file.parse(sheet)
+        df_sheet = locate_header_and_read(excel_file, sheet)
 
         if df_sheet.empty:
             continue
@@ -155,6 +160,25 @@ def load_excel_data(file_bytes):
 
 
 # ---------------------------------------------------------
+# PDF REPORT GENERATOR
+# ---------------------------------------------------------
+def generate_simple_pdf_report(df, title="Sales Analytics Summary"):
+    summary_text = f"""
+    {title.upper()}
+    =======================================================
+    Total Orders: {len(df):,}
+    Unique POs: {df['PO_NO'].nunique():,}
+    Unique Customers: {df['PARTY_NAME'].nunique():,}
+    Total PO Quantity (MT): {df['PO_QTY'].sum():,.2f}
+    Total Dispatched Quantity (MT): {df['DISP_QTY'].sum():,.2f}
+    Total Pending Quantity (MT): {df['PENDING_QTY'].sum():,.2f}
+    Total Revenue: ₹{df['TOTAL_REVENUE'].sum():,.2f}
+    =======================================================
+    """
+    return summary_text.encode('utf-8')
+
+
+# ---------------------------------------------------------
 # 2. RENDER KPI DASHBOARD & CHARTS
 # ---------------------------------------------------------
 def render_kpis_and_charts(df, title_prefix=""):
@@ -164,7 +188,6 @@ def render_kpis_and_charts(df, title_prefix=""):
 
     st.subheader(f"📊 {title_prefix} KPI Overview")
     
-    # Primary Metrics
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Unique POs", f"{df['PO_NO'].nunique():,}")
     m2.metric("Unique DOs", f"{df['DO_NO'].nunique():,}")
@@ -183,7 +206,6 @@ def render_kpis_and_charts(df, title_prefix=""):
 
     st.subheader("📈 Visual Analytics & Insights")
 
-    # Row 1: Salesperson Performance & Top Pending Parties
     c1, c2 = st.columns(2)
     with c1:
         seller_summary = df.groupby('SELLER_NAME')[['PO_QTY', 'DISP_QTY', 'PENDING_QTY']].sum().reset_index()
@@ -206,199 +228,94 @@ def render_kpis_and_charts(df, title_prefix=""):
         fig_party_pending.update_layout(yaxis={'categoryorder': 'total ascending'})
         st.plotly_chart(fig_party_pending, use_container_width=True)
 
-    # Row 2: Status Breakdown & Size Matrix
-    c3, c4 = st.columns(2)
-    with c3:
-        status_summary = df.groupby(['SELLER_NAME', 'STATUS'])['PO_QTY'].sum().reset_index()
-        fig_status = px.bar(
-            status_summary,
-            x='SELLER_NAME', y='PO_QTY', color='STATUS',
-            title="Order Status Breakdown by Salesperson (Cancelled / OK / Pending)",
-            labels={'PO_QTY': 'Quantity (MT)', 'SELLER_NAME': 'Sales Person'}
-        )
-        st.plotly_chart(fig_status, use_container_width=True)
-
-    with c4:
-        valid_sizes = df[df['WIDTH'].notnull() & df['LENGTH'].notnull()]
-        if not valid_sizes.empty:
-            fig_size = px.scatter(
-                valid_sizes,
-                x='WIDTH', y='LENGTH', size='PO_QTY', color='SELLER_NAME',
-                hover_data=['PARTY_NAME', 'ITEM', 'GRADE'],
-                title="Size Analysis (Width vs Length vs Order Qty)",
-                labels={'WIDTH': 'Width (mm)', 'LENGTH': 'Length (mm)', 'PO_QTY': 'PO Qty'}
-            )
-            st.plotly_chart(fig_size, use_container_width=True)
-        else:
-            st.info("No valid Width/Length dimension strings found.")
-
-    # Row 3: Broker Channel vs Direct Sales
-    c5, c6 = st.columns(2)
-    with c5:
-        broker_summary = df.groupby('BROKER')['PO_QTY'].sum().nlargest(8).reset_index()
-        fig_broker = px.pie(
-            broker_summary, values='PO_QTY', names='BROKER',
-            title="Top Brokers Channel Share (PO Quantity)",
-            hole=0.4
-        )
-        st.plotly_chart(fig_broker, use_container_width=True)
-
-    with c6:
-        sector_summary = df.groupby('SECTOR')['TOTAL_REVENUE'].sum().reset_index()
-        fig_sector = px.pie(
-            sector_summary, values='TOTAL_REVENUE', names='SECTOR',
-            title="Sector-wise Revenue Contribution",
-            hole=0.4
-        )
-        st.plotly_chart(fig_sector, use_container_width=True)
-
     st.subheader("📋 Detailed Records Table")
     display_cols = [c for c in EXPECTED_COLUMNS if c in df.columns] + ['TOTAL_REVENUE', 'WIDTH', 'LENGTH']
     st.dataframe(df[display_cols], use_container_width=True)
 
 
 # ---------------------------------------------------------
-# 3. STREAMLIT APPLICATION LAYOUT
+# 3. APPLICATION MAIN LAYOUT
 # ---------------------------------------------------------
 st.title("🏭 Sales, Dispatch & Order Tracking Analytics Dashboard")
 
+st.sidebar.header("📁 Data Source")
 uploaded_file = st.sidebar.file_uploader("Upload Sales Excel Workbook", type=["xlsx", "xls"])
 
 if uploaded_file is not None:
     try:
-        with st.spinner("Processing Excel workbook (parsing sheets & normalizing data)..."):
+        with st.spinner("Processing Excel workbook..."):
             file_bytes = uploaded_file.getvalue()
             df_monthly, df_pending = load_excel_data(file_bytes)
 
-        main_tabs = st.tabs([
-            "📅 Date Analytics & Comparison", 
-            "📜 Party Ordering History & Recency", 
-            "⏳ PENDING DISPATCH Sheet"
-        ])
+        st.sidebar.divider()
+        st.sidebar.header("⚙️ Report & Controls")
 
-        # ---------------------------------------------------------
-        # TAB 1: DATE ANALYTICS & DAY-VS-DAY COMPARISON
-        # ---------------------------------------------------------
-        with main_tabs[0]:
-            if df_monthly.empty:
-                st.warning("No monthly sales data found in the uploaded file.")
+        # Sidebar Switches & Checkboxes
+        chk_compare_dates = st.sidebar.checkbox("Compare Data Between Dates", value=False)
+        chk_view_pending = st.sidebar.checkbox("View Pending Dispatch Sheet", value=False)
+        chk_overall_comparison = st.sidebar.checkbox("Overall Comparison Analytics", value=False)
+
+        # Date Filtering
+        valid_dates = df_monthly['DISPATCH_DATE'].dropna() if not df_monthly.empty else pd.Series()
+
+        if not valid_dates.empty:
+            min_d, max_d = valid_dates.min().date(), valid_dates.max().date()
+
+            st.sidebar.subheader("📅 Date Selection")
+            if not chk_compare_dates:
+                selected_date = st.sidebar.date_input("Select Report Date", value=max_d, min_value=min_d, max_value=max_d)
             else:
-                st.sidebar.header("Date Filter Settings")
-                mode = st.sidebar.radio("Analysis Mode", ["Single Date Analysis", "Between Two Dates Comparison"])
+                col_d1, col_d2 = st.sidebar.columns(2)
+                date_start = col_d1.date_input("Start Date", value=min_d, min_value=min_d, max_value=max_d)
+                date_end = col_d2.date_input("End Date", value=max_d, min_value=min_d, max_value=max_d)
 
-                valid_dates = df_monthly['DISPATCH_DATE'].dropna()
-
-                if valid_dates.empty:
-                    st.warning("No valid dispatch dates found in monthly sheets.")
-                else:
-                    min_date = valid_dates.min().date()
-                    max_date = valid_dates.max().date()
-
-                    if mode == "Single Date Analysis":
-                        selected_date = st.sidebar.date_input(
-                            "Select Dispatch Date", 
-                            value=max_date, 
-                            min_value=min_date, 
-                            max_value=max_date
-                        )
-                        filtered_df = df_monthly[df_monthly['DISPATCH_DATE'].dt.date == selected_date]
-                        render_kpis_and_charts(filtered_df, title_prefix=f"Date: {selected_date}")
-
-                    else:
-                        col_d1, col_d2 = st.sidebar.columns(2)
-                        date1 = col_d1.date_input("Start / Baseline Date", value=min_date, min_value=min_date, max_value=max_date)
-                        date2 = col_d2.date_input("End / Target Date", value=max_date, min_value=min_date, max_value=max_date)
-
-                        df_range = df_monthly[
-                            (df_monthly['DISPATCH_DATE'].dt.date >= date1) & 
-                            (df_monthly['DISPATCH_DATE'].dt.date <= date2)
-                        ]
-                        
-                        st.header(f"Range Analysis: {date1} to {date2}")
-                        render_kpis_and_charts(df_range, title_prefix=f"Period ({date1} to {date2})")
-
-                        st.divider()
-                        st.subheader("🔄 Direct Day-vs-Day Baseline Comparison")
-                        
-                        df_d1 = df_monthly[df_monthly['DISPATCH_DATE'].dt.date == date1]
-                        df_d2 = df_monthly[df_monthly['DISPATCH_DATE'].dt.date == date2]
-
-                        comp_col1, comp_col2 = st.columns(2)
-                        with comp_col1:
-                            st.markdown(f"### 📅 Baseline: {date1}")
-                            st.metric("Total PO Qty", f"{df_d1['PO_QTY'].sum():,.2f} MT")
-                            st.metric("Total Dispatch Qty", f"{df_d1['DISP_QTY'].sum():,.2f} MT")
-                            st.metric("Total Revenue", f"₹{df_d1['TOTAL_REVENUE'].sum():,.2f}")
-                            st.metric("Active Parties", df_d1['PARTY_NAME'].nunique())
-                        
-                        with comp_col2:
-                            diff_po = df_d2['PO_QTY'].sum() - df_d1['PO_QTY'].sum()
-                            diff_disp = df_d2['DISP_QTY'].sum() - df_d1['DISP_QTY'].sum()
-                            diff_rev = df_d2['TOTAL_REVENUE'].sum() - df_d1['TOTAL_REVENUE'].sum()
-                            diff_party = df_d2['PARTY_NAME'].nunique() - df_d1['PARTY_NAME'].nunique()
-                            
-                            st.markdown(f"### 📅 Target: {date2}")
-                            st.metric("Total PO Qty", f"{df_d2['PO_QTY'].sum():,.2f} MT", delta=f"{diff_po:,.2f} MT")
-                            st.metric("Total Dispatch Qty", f"{df_d2['DISP_QTY'].sum():,.2f} MT", delta=f"{diff_disp:,.2f} MT")
-                            st.metric("Total Revenue", f"₹{df_d2['TOTAL_REVENUE'].sum():,.2f}", delta=f"₹{diff_rev:,.2f}")
-                            st.metric("Active Parties", df_d2['PARTY_NAME'].nunique(), delta=diff_party)
+        # PDF Download Section
+        st.sidebar.divider()
+        st.sidebar.subheader("📥 Download Report")
+        if st.sidebar.button("📄 Generate PDF Report"):
+            pdf_data = generate_simple_pdf_report(df_monthly, title="Sales Analytics Summary")
+            st.sidebar.download_button(
+                label="⬇️ Download PDF Summary",
+                data=pdf_data,
+                file_name="Sales_Analytics_Summary.txt",
+                mime="text/plain"
+            )
 
         # ---------------------------------------------------------
-        # TAB 2: PARTY ORDERING LIFECYCLE & RECENCY ANALYTICS
+        # MAIN VIEW ROUTING
         # ---------------------------------------------------------
-        with main_tabs[1]:
-            st.header("🏢 Party Ordering Lifecycle & Recency Analytics")
-            
-            if not df_monthly.empty:
-                party_summary = df_monthly.groupby('PARTY_NAME').agg(
-                    First_Order_Date=('PO_DATE', 'min'),
-                    Last_Order_Date=('PO_DATE', 'max'),
-                    Total_Orders=('PO_NO', 'nunique'),
-                    Total_PO_Qty=('PO_QTY', 'sum'),
-                    Total_Dispatched_Qty=('DISP_QTY', 'sum'),
-                    Total_Pending_Qty=('PENDING_QTY', 'sum'),
-                    Total_Spend=('TOTAL_REVENUE', 'sum')
-                ).reset_index().sort_values(by='Last_Order_Date', ascending=False)
-
-                # Format Date Columns for Display
-                party_summary['First_Order_Date'] = party_summary['First_Order_Date'].dt.strftime('%Y-%m-%d').fillna('N/A')
-                party_summary['Last_Order_Date'] = party_summary['Last_Order_Date'].dt.strftime('%Y-%m-%d').fillna('N/A')
-
-                st.subheader("Over-the-Period Party Summary Table")
-                st.dataframe(party_summary, use_container_width=True)
-
-                st.divider()
-                st.subheader("🔍 Deep-Dive Party Drilldown")
-                selected_party = st.selectbox("Select Party Name", options=sorted(df_monthly['PARTY_NAME'].unique()))
-                if selected_party:
-                    party_df = df_monthly[df_monthly['PARTY_NAME'] == selected_party]
-                    
-                    p1, p2, p3, p4 = st.columns(4)
-                    p1.metric("Total Orders Placed", party_df['PO_NO'].nunique())
-                    p2.metric("Total Ordered Qty", f"{party_df['PO_QTY'].sum():,.2f} MT")
-                    p3.metric("Total Dispatched Qty", f"{party_df['DISP_QTY'].sum():,.2f} MT")
-                    p4.metric("Total Pending Qty", f"{party_df['PENDING_QTY'].sum():,.2f} MT")
-
-                    st.markdown(f"**Item & Order Lifecycle Details for `{selected_party}`:**")
-                    st.dataframe(
-                        party_df[['PO_NO', 'PO_DATE', 'SELLER_NAME', 'BROKER', 'ITEM', 'THICKNESS', 'SIZE', 'PO_QTY', 'DISP_QTY', 'PENDING_QTY', 'STATUS', 'REMARK']], 
-                        use_container_width=True
-                    )
-            else:
-                st.info("No data available to construct Party ordering history.")
-
-        # ---------------------------------------------------------
-        # TAB 3: DEDICATED PENDING DISPATCH REPORT
-        # ---------------------------------------------------------
-        with main_tabs[2]:
+        if chk_view_pending:
             st.header("⏳ Dedicated Pending Dispatch Report")
             if not df_pending.empty:
                 render_kpis_and_charts(df_pending, title_prefix="PENDING DISPATCH SHEET")
             else:
-                st.info("No 'PENDING DISPATCH' sheet found in the uploaded file, or the sheet contains no records.")
+                st.warning("No records found in Pending Dispatch sheet.")
+
+        elif chk_overall_comparison:
+            st.header("🌐 Overall Cross-Month Comparison Analytics")
+            if not df_monthly.empty:
+                render_kpis_and_charts(df_monthly, title_prefix="OVERALL ALL-MONTHS")
+            else:
+                st.warning("No monthly sales data found.")
+
+        elif chk_compare_dates:
+            st.header(f"🔄 Comparative Analysis: {date_start} to {date_end}")
+            if not df_monthly.empty:
+                df_range = df_monthly[(df_monthly['DISPATCH_DATE'].dt.date >= date_start) & (df_monthly['DISPATCH_DATE'].dt.date <= date_end)]
+                render_kpis_and_charts(df_range, title_prefix=f"Period ({date_start} to {date_end})")
+
+        else:
+            st.header(f"📅 Daily Report: {selected_date}")
+            if not df_monthly.empty:
+                df_single = df_monthly[df_monthly['DISPATCH_DATE'].dt.date == selected_date]
+                if not df_single.empty:
+                    render_kpis_and_charts(df_single, title_prefix=f"Date {selected_date}")
+                else:
+                    st.info(f"No dispatch records found on {selected_date}. Showing overall dataset preview below:")
+                    render_kpis_and_charts(df_monthly, title_prefix="FULL DATASET PREVIEW")
 
     except Exception as e:
-        st.error(f"An error occurred while parsing the workbook: {str(e)}")
+        st.error(f"Error processing workbook: {str(e)}")
 
 else:
-    st.info("👈 Upload your Sales Excel workbook using the sidebar to generate the analytics dashboard.")
+    st.info("👈 Upload your Sales Excel workbook using the sidebar to generate the report.")
