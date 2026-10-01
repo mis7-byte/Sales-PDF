@@ -35,9 +35,9 @@ EXPECTED_COLUMNS = {
     'SECTOR': ['sector'],
     'PLACE': ['place', 'city', 'location'],
     'SELLER NAME': ['seller name', 'seller_name', 'sales person', 'salesperson', 'sales executive'],
-    'ITEM': ['item', 'item name', 'item_name', 'product'],
+    'ITEM': ['item', 'item name', 'item_name', 'product', 'discription'],
     'THICKNESS': ['thikness', 'thickness', 'thk', 'thk.'],
-    'SIZE': ['size'],
+    'SIZE': ['size', 'size (mm)'],
     'GRADE': ['grade'],
     'PO QTY (MT)': ['po qty (mt)', 'po qty', 'po_qty', 'ordered qty', 'order qty'],
     'PER TON': ['per ton', 'rate', 'price/ton', 'rate per ton'],
@@ -89,10 +89,20 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         if std_col not in df.columns:
             df[std_col] = np.nan
 
-    # Drop summary/total rows
+    # Clean numeric columns first
+    numeric_cols = ['PO QTY (MT)', 'PER TON', 'DISP.QTY', 'PENDING']
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+
+    # STRICTLY DROP Excel Summary / Total Rows
+    # 1. Drop rows where PARTY NAME is NaN or contains 'total' / 'sum'
+    # 2. Drop rows where PARTY NAME is missing and both DO NO and SELLER NAME are missing
     if 'PARTY NAME' in df.columns:
-        is_total_row = df['PARTY NAME'].astype(str).str.lower().str.contains('total|sum', na=False)
-        df = df[~is_total_row].copy()
+        is_total_word = df['PARTY NAME'].astype(str).str.lower().str.contains('total|sum', na=False)
+        is_empty_party = df['PARTY NAME'].isna() | (df['PARTY NAME'].astype(str).str.strip() == '') | (df['PARTY NAME'].astype(str).str.lower() == 'nan')
+        is_empty_do = df['DO NO'].isna() | (df['DO NO'].astype(str).str.strip() == '') | (df['DO NO'].astype(str).str.lower() == 'nan')
+        
+        df = df[~(is_total_word | (is_empty_party & is_empty_do))].copy()
 
     if 'PO DATE' in df.columns:
         po_date_clean = df['PO DATE'].astype(str).str.replace('.', '/', regex=False)
@@ -103,20 +113,13 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         df['DATE'] = pd.to_datetime(disp_date_clean, dayfirst=True, errors='coerce')
     
     df['PO_DATE_STR'] = df['PO DATE'].dt.strftime('%d/%m/%Y').fillna('N/A')
-    
-    numeric_cols = ['PO QTY (MT)', 'PER TON', 'DISP.QTY', 'PENDING']
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-        
     df['AMOUNT'] = df['PO QTY (MT)'] * df['PER TON']
     
     str_cols = ['PARTY NAME', 'SELLER NAME', 'ITEM', 'STATUS', 'REMARK', 'BROKER', 'SECTOR', 'PLACE', 'PO NO', 'DO NO', 'THICKNESS']
     for c in str_cols:
         df[c] = df[c].fillna('N/A').astype(str).str.strip()
 
-    # Clean thickness column
     df['THICKNESS_MM'] = df['THICKNESS'].astype(str).str.replace(r'(?i)\s*mm', '', regex=True).str.strip()
-
     df['IS_CANCELLED'] = df['STATUS'].str.lower().str.contains('cancel') | df['REMARK'].str.lower().str.contains('cancel')
     df['CANCELLED_QTY'] = np.where(df['IS_CANCELLED'], df['PO QTY (MT)'], 0.0)
     df['ACTIVE_PENDING_QTY'] = np.where(df['IS_CANCELLED'], 0.0, df['PENDING'])
@@ -336,9 +339,9 @@ section = st.sidebar.radio("Go to Section", [
 ])
 
 def calculate_kpis(data):
-    total_po = data['PO NO'].replace('Unknown', np.nan).dropna().nunique()
-    total_do = data['DO NO'].replace('Unknown', np.nan).dropna().nunique()
-    num_parties = data['PARTY NAME'].replace('Unknown', np.nan).dropna().nunique()
+    total_po = data['PO NO'].replace(['N/A', 'Unknown', 'nan'], np.nan).dropna().nunique()
+    total_do = data['DO NO'].replace(['N/A', 'Unknown', 'nan'], np.nan).dropna().nunique()
+    num_parties = data['PARTY NAME'].replace(['N/A', 'Unknown', 'nan'], np.nan).dropna().nunique()
     total_po_qty = data['PO QTY (MT)'].sum()
     total_amount = data['AMOUNT'].sum()
     dispatched_qty = data['DISP.QTY'].sum()
@@ -616,7 +619,6 @@ elif section == "📊 All Sales & Dispatch Analytics":
         'PendingQty': 'Pending Qty (MT)'
     }, inplace=True)
 
-    # Filter control for Item
     items_list = ["All Items"] + sorted(item_spec_grp['Item Name'].unique().tolist())
     selected_item_filter = st.selectbox("Filter Table by Item Name", items_list)
 
@@ -676,20 +678,26 @@ elif section == "🚚 Pending Dispatch":
     pd_sheet = st.sidebar.selectbox("Select Pending Dispatch Sheet", sheet_names, index=sheet_names.index(target_pd_sheet) if target_pd_sheet in sheet_names else 0)
     
     df_pd = load_and_clean_sheet(uploaded_file, pd_sheet)
-    active_pd = df_pd[(df_pd['ACTIVE_PENDING_QTY'] > 0) & (~df_pd['IS_CANCELLED']) & (df_pd['PARTY NAME'] != 'Unknown')].copy()
+    active_pd = df_pd[(df_pd['ACTIVE_PENDING_QTY'] > 0) & (~df_pd['IS_CANCELLED'])].copy()
     
     pd_kpis = {
-        'Pending Orders': active_pd['PO NO'].replace('Unknown', np.nan).dropna().nunique(),
-        'Parties Impacted': active_pd['PARTY NAME'].replace('Unknown', np.nan).dropna().nunique(),
+        'Delivery Orders (DOs)': active_pd['DO NO'].replace(['N/A', 'Unknown', 'nan'], np.nan).dropna().nunique(),
+        'Purchase Orders (POs)': active_pd['PO NO'].replace(['N/A', 'Unknown', 'nan'], np.nan).dropna().nunique(),
+        'Parties Impacted': active_pd['PARTY NAME'].replace(['N/A', 'Unknown', 'nan'], np.nan).dropna().nunique(),
+        'Pending Line Items': len(active_pd),
         'Total Pending Qty (MT)': active_pd['ACTIVE_PENDING_QTY'].sum(),
         'Est. Pending Value (₹)': (active_pd['ACTIVE_PENDING_QTY'] * active_pd['PER TON']).sum()
     }
     
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Pending Orders", f"{pd_kpis['Pending Orders']:,}")
-    c2.metric("Parties Impacted", f"{pd_kpis['Parties Impacted']:,}")
-    c3.metric("Total Pending Qty", f"{pd_kpis['Total Pending Qty (MT)']:,.2f} MT")
-    c4.metric("Est. Pending Value", f"₹{pd_kpis['Est. Pending Value (₹)']:,.2f}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Pending DOs Count", f"{pd_kpis['Delivery Orders (DOs)']:,}")
+    c2.metric("Pending POs Count", f"{pd_kpis['Purchase Orders (POs)']:,}")
+    c3.metric("Parties Impacted", f"{pd_kpis['Parties Impacted']:,}")
+
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Pending Line Items", f"{pd_kpis['Pending Line Items']:,}")
+    c5.metric("Total Pending Qty", f"{pd_kpis['Total Pending Qty (MT)']:,.2f} MT")
+    c6.metric("Est. Pending Value", f"₹{pd_kpis['Est. Pending Value (₹)']:,.2f}")
     
     st.markdown("---")
     st.subheader("Pending Quantity Breakdown by Sales Person")
@@ -710,7 +718,7 @@ elif section == "🚚 Pending Dispatch":
     st.markdown("---")
     st.subheader("📋 Pending Dispatch Detailed Data Table")
     
-    pending_details_df = active_pd[['PO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'THICKNESS_MM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']].copy()
+    pending_details_df = active_pd[['PO NO', 'DO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'THICKNESS_MM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']].copy()
     pending_details_df.rename(columns={'THICKNESS_MM': 'THICKNESS (mm)', 'ACTIVE_PENDING_QTY': 'PENDING QTY'}, inplace=True)
     st.dataframe(pending_details_df, use_container_width=True)
 
