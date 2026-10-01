@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import io
 import re
+import matplotlib.pyplot as plt
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, KeepTogether
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -126,9 +127,73 @@ def load_and_clean_sheet(file_bytes, sheet_name):
     return df
 
 # ---------------------------------------------------------
+# Matplotlib Pure Python Chart Helpers for PDF Export
+# ---------------------------------------------------------
+def make_pie_chart_bytes(labels, values, title):
+    fig, ax = plt.subplots(figsize=(6, 3.2), dpi=200)
+    valid_vals = [v if v > 0 else 0 for v in values]
+    
+    if sum(valid_vals) == 0:
+        plt.close(fig)
+        return None
+        
+    wedges, texts, autotexts = ax.pie(
+        valid_vals, 
+        labels=labels, 
+        autopct="%1.1f%%", 
+        startangle=90, 
+        colors=['#10B981', '#F59E0B', '#EF4444']
+    )
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_weight('bold')
+        autotext.set_fontsize(8)
+        
+    ax.set_title(title, fontsize=10, fontweight='bold', color='#1E3A8A', pad=10)
+    plt.tight_layout()
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+def make_bar_chart_bytes(df_data, x_col, y_cols, title, color='#2563EB'):
+    if df_data is None or df_data.empty:
+        return None
+        
+    fig, ax = plt.subplots(figsize=(7, 3.5), dpi=200)
+    
+    if isinstance(y_cols, list):
+        x = np.arange(len(df_data[x_col]))
+        width = 0.8 / len(y_cols)
+        for idx, col in enumerate(y_cols):
+            rects = ax.bar(x + idx*width, df_data[col], width, label=col)
+            ax.bar_label(rects, fmt='%.1f', padding=2, fontsize=5)
+        ax.set_xticks(x + width*(len(y_cols)-1)/2)
+        ax.set_xticklabels(df_data[x_col].astype(str), rotation=35, ha='right', fontsize=6)
+        ax.legend(fontsize=6, loc='upper right')
+    else:
+        rects = ax.bar(df_data[x_col].astype(str), df_data[y_cols], color=color, width=0.45)
+        ax.bar_label(rects, fmt='%.1f', padding=2, fontsize=6.5, fontweight='bold')
+        plt.xticks(rotation=35, ha='right', fontsize=6.5)
+
+    ax.set_title(title, fontsize=10, fontweight='bold', color='#1E3A8A', pad=10)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+    plt.tight_layout()
+    
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+# ---------------------------------------------------------
 # Thread-Safe ReportLab PDF Generator
 # ---------------------------------------------------------
-def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
+def generate_exact_screen_pdf(sheet_name, kpis, chart_buffers, tables_dict):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
@@ -145,18 +210,18 @@ def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
         'DocTitle', parent=styles['Heading1'], fontSize=16, textColor=colors.HexColor('#1E3A8A'), spaceAfter=8
     )
     section_style = ParagraphStyle(
-        'DocSection', parent=styles['Heading2'], fontSize=12, textColor=colors.HexColor('#1E40AF'), spaceBefore=14, spaceAfter=6
+        'DocSection', parent=styles['Heading2'], fontSize=11, textColor=colors.HexColor('#1E40AF'), spaceBefore=14, spaceAfter=6
     )
     cell_style = ParagraphStyle(
-        'TableCell', parent=styles['Normal'], fontSize=7.5, leading=9, alignment=0
+        'TableCell', parent=styles['Normal'], fontSize=7, leading=8.5, alignment=0
     )
     cell_header = ParagraphStyle(
-        'HeaderCell', parent=styles['Normal'], fontSize=8, leading=10, textColor=colors.whitesmoke, fontName="Helvetica-Bold", alignment=0
+        'HeaderCell', parent=styles['Normal'], fontSize=7.5, leading=9, textColor=colors.whitesmoke, fontName="Helvetica-Bold", alignment=0
     )
     
     # Title
     story.append(Paragraph(f"<b>📊 Sales & Dispatch Analytics — {sheet_name}</b>", title_style))
-    story.append(Spacer(1, 8))
+    story.append(Spacer(1, 6))
     
     # 1. KPIs Section Card Layout
     if kpis:
@@ -190,24 +255,21 @@ def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
             ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#D1D5DB')),
         ]))
         story.append(t_kpi)
-        story.append(Spacer(1, 12))
+        story.append(Spacer(1, 10))
 
-    # 2. Convert and Embed Plotly Charts
-    for fig_title, fig in plotly_figs.items():
-        if fig is not None:
-            try:
-                img_bytes = fig.to_image(format="png", width=750, height=350, scale=2)
-                img_buffer = io.BytesIO(img_bytes)
+    # 2. Render Charts from Matplotlib Byte Buffers
+    if chart_buffers:
+        story.append(Paragraph("<b>2. Visual Analytics</b>", section_style))
+        for fig_title, buf in chart_buffers.items():
+            if buf is not None:
                 story.append(KeepTogether([
-                    Paragraph(f"<b>{fig_title}</b>", section_style),
-                    Spacer(1, 4),
-                    Image(img_buffer, width=540, height=252),
-                    Spacer(1, 10)
+                    Paragraph(f"<b>{fig_title}</b>", ParagraphStyle('SubHead', parent=styles['Normal'], fontSize=9, fontName="Helvetica-Bold", textColor=colors.HexColor('#1E40AF'))),
+                    Spacer(1, 3),
+                    Image(buf, width=520, height=230),
+                    Spacer(1, 8)
                 ]))
-            except Exception:
-                pass
 
-    # 3. Dynamic Tables with Auto Row-Wrap
+    # 3. Dynamic Tables with Auto Row-Wrap (Prevents Row Cutting)
     for title, df_table in tables_dict.items():
         if df_table is not None and not df_table.empty:
             story.append(Paragraph(f"<b>{title}</b>", section_style))
@@ -223,22 +285,20 @@ def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
                     formatted_row.append(Paragraph(val_str, cell_style))
                 table_data.append(formatted_row)
             
-            available_width = 540
-            col_width = available_width / max(len(cols), 1)
-            
+            col_width = 540 / max(len(cols), 1)
             t_data = Table(table_data, colWidths=[col_width]*len(cols), repeatRows=1)
             t_data.setStyle(TableStyle([
                 ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1F2937')),
                 ('ALIGN', (0,0), (-1,-1), 'LEFT'),
                 ('VALIGN', (0,0), (-1,-1), 'TOP'),
-                ('TOPPADDING', (0,0), (-1,-1), 4),
-                ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+                ('TOPPADDING', (0,0), (-1,-1), 3),
+                ('BOTTOMPADDING', (0,0), (-1,-1), 3),
                 ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F9FAFB')]),
                 ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E5E7EB')),
             ]))
             
             story.append(t_data)
-            story.append(Spacer(1, 12))
+            story.append(Spacer(1, 10))
             
     doc.build(story)
     buffer.seek(0)
@@ -549,12 +609,22 @@ elif section == "📊 All Sales & Dispatch Analytics":
     st.markdown("---")
     st.subheader("📄 Download Dashboard PDF Report")
     
-    plotly_figs = {
-        "Overall Status Breakdown": fig_kpi,
-        "Dispatched Qty by Sales Person": fig_disp,
-        "Order Received Qty by Sales Person": fig_rec,
-        "Party-Wise Breakdown (Top 15)": fig_party,
-        "Qty Breakdown by Width and Item": fig_width
+    # Generate Matplotlib chart buffers for reliable PDF export
+    chart_bufs = {
+        "Overall Status Breakdown": make_pie_chart_bytes(
+            ['Dispatched Qty', 'Cancelled Qty', 'Pending Qty'],
+            [kpis['Dispatched Qty (MT)'], kpis['Cancelled Qty (MT)'], kpis['Pending Qty (MT)']],
+            "Overall Status Breakdown"
+        ),
+        "Dispatched Qty by Sales Person": make_bar_chart_bytes(
+            sp_disp, 'SELLER NAME', 'DISP.QTY', "Dispatched Qty by Sales Person", color='#10B981'
+        ),
+        "Order Received Qty by Sales Person": make_bar_chart_bytes(
+            sp_rec, 'SELLER NAME', 'PO QTY (MT)', "Order Received Qty by Sales Person", color='#3B82F6'
+        ),
+        "Top Parties Breakdown": make_bar_chart_bytes(
+            filtered_party_grp.head(10), 'PARTY NAME', ['OrderedQty', 'DispatchedQty', 'PendingQty'], "Top Parties Breakdown"
+        )
     }
     
     tables_to_pdf = {
@@ -565,7 +635,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
         "Material & Width Breakdown Summary": width_grp
     }
     
-    pdf_bytes = generate_exact_screen_pdf(selected_sheet, kpis, plotly_figs, tables_to_pdf)
+    pdf_bytes = generate_exact_screen_pdf(selected_sheet, kpis, chart_bufs, tables_to_pdf)
     if pdf_bytes:
         st.download_button(
             "📥 Download Complete PDF Report", 
@@ -604,8 +674,10 @@ elif section == "🚚 Pending Dispatch":
     st.markdown("---")
     st.subheader("Pending Quantity Breakdown by Sales Person")
     
+    sp_pd_df = active_pd.groupby('SELLER NAME')['ACTIVE_PENDING_QTY'].sum().reset_index()
+    
     fig_pd = px.bar(
-        active_pd.groupby('SELLER NAME')['ACTIVE_PENDING_QTY'].sum().reset_index(),
+        sp_pd_df,
         x='SELLER NAME',
         y='ACTIVE_PENDING_QTY',
         title="Pending Dispatch Qty (MT) by Sales Person",
@@ -625,10 +697,16 @@ elif section == "🚚 Pending Dispatch":
     st.markdown("---")
     st.subheader("📥 Export Pending Dispatch PDF")
     
+    pd_chart_bufs = {
+        "Pending Quantity Breakdown": make_bar_chart_bytes(
+            sp_pd_df, 'SELLER NAME', 'ACTIVE_PENDING_QTY', "Pending Dispatch Qty by Sales Person", color='#EF4444'
+        )
+    }
+    
     pdf_bytes = generate_exact_screen_pdf(
         pd_sheet,
         pd_kpis,
-        {"Pending Quantity Breakdown": fig_pd},
+        pd_chart_bufs,
         {"Pending Dispatch Details": pending_details_df}
     )
     if pdf_bytes:
