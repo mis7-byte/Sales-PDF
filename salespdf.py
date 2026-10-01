@@ -134,7 +134,7 @@ def load_and_clean_sheet(file_bytes, sheet_name):
     return df
 
 # ---------------------------------------------------------
-# Matplotlib Pure Python Chart Helpers for PDF Export
+# Matplotlib Chart Helpers for PDF Export
 # ---------------------------------------------------------
 def make_pie_chart_bytes(labels, values, title):
     fig, ax = plt.subplots(figsize=(6, 3.2), dpi=200)
@@ -198,7 +198,7 @@ def make_bar_chart_bytes(df_data, x_col, y_cols, title, color='#2563EB'):
     return buf
 
 # ---------------------------------------------------------
-# Dynamic & Flexible Thread-Safe PDF Generator
+# Dynamic PDF Generator
 # ---------------------------------------------------------
 def generate_exact_screen_pdf(sheet_name, kpis, chart_buffers, tables_dict):
     buffer = io.BytesIO()
@@ -387,15 +387,19 @@ if section == "📅 Month Wise & Date Filter":
         c3.metric("Dispatched Qty", f"{d_kpis['Dispatched Qty (MT)']:,.2f} MT")
         c4.metric("Total Amount", f"₹{d_kpis['Total PO Amount']:,.2f}")
         
-        st.dataframe(filtered_df, use_container_width=True)
+        # Clean display table (hiding internal calculation columns)
+        display_cols = [c for c in ['PO NO', 'DO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'THICKNESS', 'SIZE', 'PO QTY (MT)', 'PER TON', 'DISP.QTY', 'PENDING', 'STATUS', 'REMARK'] if c in filtered_df.columns]
+        st.dataframe(filtered_df[display_cols], use_container_width=True)
 
         st.markdown("---")
         st.subheader("📥 Download Date-Wise PDF Report")
+        
+        pdf_table_cols = [c for c in ['PO NO', 'DO NO', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'PO QTY (MT)', 'DISP.QTY', 'PENDING', 'STATUS'] if c in filtered_df.columns]
         date_pdf_bytes = generate_exact_screen_pdf(
             f"{selected_sheet} - {selected_date_str}",
             d_kpis,
             {},
-            {f"Orders for Date {selected_date_str}": filtered_df[['PO NO', 'DO NO', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'PO QTY (MT)', 'DISP.QTY', 'PENDING', 'STATUS']]}
+            {f"Orders for Date {selected_date_str}": filtered_df[pdf_table_cols]}
         )
         st.download_button(
             f"📥 Download Report for {selected_date_str}",
@@ -739,7 +743,7 @@ elif section == "🚚 Pending Dispatch":
     st.subheader("📋 Pending Dispatch Detailed Data Table")
     
     pending_details_df = active_pd[['PO NO', 'DO NO', 'PO_DATE_STR', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'THICKNESS_MM', 'SIZE', 'PO QTY (MT)', 'DISP.QTY', 'ACTIVE_PENDING_QTY', 'REMARK']].copy()
-    pending_details_df.rename(columns={'THICKNESS_MM': 'THICKNESS (mm)', 'ACTIVE_PENDING_QTY': 'PENDING QTY'}, inplace=True)
+    pending_details_df.rename(columns={'THICKNESS_MM': 'THICKNESS (mm)', 'ACTIVE_PENDING_QTY': 'PENDING QTY', 'PO_DATE_STR': 'PO DATE'}, inplace=True)
     st.dataframe(pending_details_df, use_container_width=True)
 
     st.markdown("---")
