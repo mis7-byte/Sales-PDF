@@ -207,7 +207,7 @@ def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
             except Exception:
                 pass
 
-    # 3. Dynamic Tables with Auto Row-Wrap (Prevents Row Cutting)
+    # 3. Dynamic Tables with Auto Row-Wrap
     for title, df_table in tables_dict.items():
         if df_table is not None and not df_table.empty:
             story.append(Paragraph(f"<b>{title}</b>", section_style))
@@ -242,7 +242,7 @@ def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
             
     doc.build(story)
     buffer.seek(0)
-    return buffer
+    return buffer.getvalue()
 
 # ---------------------------------------------------------
 # Sidebar Controls & Navigation
