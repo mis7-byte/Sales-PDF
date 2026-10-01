@@ -6,6 +6,8 @@ import plotly.graph_objects as go
 import io
 import re
 import asyncio
+import os
+import base64
 from pyppeteer import launch
 
 # ---------------------------------------------------------
@@ -16,30 +18,6 @@ st.set_page_config(
     page_icon="📊",
     layout="wide"
 )
-
-# Screen & Print CSS styling
-st.markdown("""
-    <style>
-    @media print {
-        section[data-testid="stSidebar"], .stButton, header, footer, iframe {
-            display: none !important;
-        }
-        .main .block-container {
-            max-width: 100% !important;
-            padding: 0 !important;
-            margin: 0 !important;
-        }
-        body {
-            background-color: white !important;
-        }
-        tr, td, th {
-            page-break-inside: avoid !important;
-        }
-    }
-    </style>
-""", unsafe_allow_html=True)
-
-st.title("📊 Sales & Dispatch Analytics Dashboard")
 
 # ---------------------------------------------------------
 # Flexible Excel Header & Column Normalization
@@ -146,16 +124,37 @@ def load_and_clean_sheet(file_bytes, sheet_name):
     return df
 
 # ---------------------------------------------------------
-# HTML View Generator for Screen-Accurate Exporter
+# Pyppeteer Async PDF Engine (Streamlit Cloud Compatible)
 # ---------------------------------------------------------
 async def html_to_pdf_pyppeteer(html_content):
-    browser = await launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+    launch_args = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu'
+    ]
+    
+    # Auto-detect system Chromium binary on Linux/Streamlit Cloud vs Local
+    executable_path = None
+    if os.path.exists('/usr/bin/chromium'):
+        executable_path = '/usr/bin/chromium'
+    elif os.path.exists('/usr/bin/chromium-browser'):
+        executable_path = '/usr/bin/chromium-browser'
+
+    launch_kwargs = {
+        'headless': True,
+        'args': launch_args
+    }
+    if executable_path:
+        launch_kwargs['executablePath'] = executable_path
+
+    browser = await launch(**launch_kwargs)
     page = await browser.newPage()
     await page.setContent(html_content, waitUntil='networkidle0')
     pdf_data = await page.pdf({
         'format': 'A4',
         'printBackground': True,
-        'margin': {'top': '20px', 'right': '20px', 'bottom': '20px', 'left': '20px'}
+        'margin': {'top': '25px', 'right': '25px', 'bottom': '25px', 'left': '25px'}
     })
     await browser.close()
     return pdf_data
@@ -167,19 +166,24 @@ def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
     <head>
         <meta charset="utf-8">
         <style>
-            body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; color: #1F2937; background: #FFF; }}
-            h1 {{ color: #1E3A8A; border-bottom: 2px solid #2563EB; padding-bottom: 8px; font-size: 24px; }}
-            h2 {{ color: #1E40AF; font-size: 18px; margin-top: 25px; margin-bottom: 10px; }}
-            .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 20px; }}
-            .kpi-card {{ background: #F3F4F6; border-radius: 8px; padding: 12px; border-left: 4px solid #2563EB; }}
-            .kpi-title {{ font-size: 11px; color: #4B5563; font-weight: bold; text-transform: uppercase; }}
-            .kpi-value {{ font-size: 18px; color: #111827; font-weight: bold; margin-top: 4px; }}
+            body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 10px; color: #1F2937; background: #FFF; }}
+            h1 {{ color: #1E3A8A; border-bottom: 2px solid #2563EB; padding-bottom: 8px; font-size: 22px; margin-bottom: 15px; }}
+            h2 {{ color: #1E40AF; font-size: 16px; margin-top: 25px; margin-bottom: 10px; }}
+            
+            .kpi-grid {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }}
+            .kpi-card {{ background: #F3F4F6; border-radius: 6px; padding: 10px; border-left: 4px solid #2563EB; }}
+            .kpi-title {{ font-size: 10px; color: #4B5563; font-weight: bold; text-transform: uppercase; }}
+            .kpi-value {{ font-size: 16px; color: #111827; font-weight: bold; margin-top: 4px; }}
+            
             .chart-container {{ width: 100%; text-align: center; margin-bottom: 20px; page-break-inside: avoid; }}
-            .chart-img {{ max-width: 100%; height: auto; border-radius: 6px; border: 1px solid #E5E7EB; }}
-            table {{ width: 100%; border-collapse: collapse; margin-top: 10px; margin-bottom: 20px; font-size: 11px; }}
-            th {{ background-color: #1F2937; color: white; text-align: left; padding: 8px; font-weight: 600; }}
-            td {{ padding: 7px 8px; border-bottom: 1px solid #E5E7EB; }}
+            .chart-img {{ max-width: 100%; height: auto; border-radius: 4px; border: 1px solid #E5E7EB; }}
+            
+            table {{ width: 100%; border-collapse: collapse; margin-top: 8px; margin-bottom: 20px; font-size: 10px; }}
+            th {{ background-color: #1F2937; color: white; text-align: left; padding: 6px 8px; font-weight: 600; }}
+            td {{ padding: 6px 8px; border-bottom: 1px solid #E5E7EB; }}
             tr:nth-child(even) {{ background-color: #F9FAFB; }}
+            
+            /* Crucial: Prevent splitting rows in half across PDF pages */
             tr, td, th {{ page-break-inside: avoid !important; }}
         </style>
     </head>
@@ -199,12 +203,11 @@ def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
         </div>
     """
     
-    # Append Plotly Charts as Images
+    # Render Plotly Charts to Image
     for title, fig in plotly_figs.items():
         if fig is not None:
             try:
-                img_bytes = fig.to_image(format="png", width=900, height=420, scale=2)
-                import base64
+                img_bytes = fig.to_image(format="png", width=850, height=380, scale=2)
                 b64_img = base64.b64encode(img_bytes).decode('utf-8')
                 html += f"""
                 <div class="chart-container">
@@ -215,10 +218,10 @@ def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
             except Exception:
                 pass
 
-    # Append Full Dynamic Data Tables
+    # Render Clean Auto-Expanding Data Tables
     for title, df_table in tables_dict.items():
         if df_table is not None and not df_table.empty:
-            html += f"<h2>{title}</h2><table><thead><tr>"
+            html += f"2. <h2>{title}</h2><table><thead><tr>"
             for col in df_table.columns:
                 html += f"<th>{col}</th>"
             html += "</tr></thead><tbody>"
@@ -234,10 +237,9 @@ def generate_exact_screen_pdf(sheet_name, kpis, plotly_figs, tables_dict):
     html += "</body></html>"
     
     try:
-        pdf_bytes = asyncio.run(html_to_pdf_pyppeteer(html))
-        return pdf_bytes
-    except Exception:
-        # Fallback buffer
+        return asyncio.run(html_to_pdf_pyppeteer(html))
+    except Exception as e:
+        st.error(f"Error generating PDF: {str(e)}")
         return None
 
 # ---------------------------------------------------------
