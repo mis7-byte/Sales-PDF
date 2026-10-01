@@ -89,14 +89,10 @@ def load_and_clean_sheet(file_bytes, sheet_name):
         if std_col not in df.columns:
             df[std_col] = np.nan
 
-    # Clean numeric columns first
     numeric_cols = ['PO QTY (MT)', 'PER TON', 'DISP.QTY', 'PENDING']
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
-    # STRICTLY DROP Excel Summary / Total Rows
-    # 1. Drop rows where PARTY NAME is NaN or contains 'total' / 'sum'
-    # 2. Drop rows where PARTY NAME is missing and both DO NO and SELLER NAME are missing
     if 'PARTY NAME' in df.columns:
         is_total_word = df['PARTY NAME'].astype(str).str.lower().str.contains('total|sum', na=False)
         is_empty_party = df['PARTY NAME'].isna() | (df['PARTY NAME'].astype(str).str.strip() == '') | (df['PARTY NAME'].astype(str).str.lower() == 'nan')
@@ -233,7 +229,6 @@ def generate_exact_screen_pdf(sheet_name, kpis, chart_buffers, tables_dict):
     story.append(Paragraph(f"<b>📊 Sales & Dispatch Report — {sheet_name}</b>", title_style))
     story.append(Spacer(1, 6))
     
-    # 1. Flexible KPIs Section
     if kpis:
         story.append(Paragraph("<b>1. Key Performance Indicators (KPIs)</b>", section_style))
         kpi_items = []
@@ -272,7 +267,6 @@ def generate_exact_screen_pdf(sheet_name, kpis, chart_buffers, tables_dict):
         story.append(t_kpi)
         story.append(Spacer(1, 10))
 
-    # 2. Render Charts from Matplotlib Byte Buffers
     if chart_buffers:
         story.append(Paragraph("<b>2. Visual Analytics</b>", section_style))
         for fig_title, buf in chart_buffers.items():
@@ -284,7 +278,6 @@ def generate_exact_screen_pdf(sheet_name, kpis, chart_buffers, tables_dict):
                     Spacer(1, 8)
                 ]))
 
-    # 3. Dynamic Tables with Auto Row-Wrap
     for title, df_table in tables_dict.items():
         if df_table is not None and not df_table.empty:
             story.append(Paragraph(f"<b>{title}</b>", section_style))
@@ -395,6 +388,21 @@ if section == "📅 Month Wise & Date Filter":
         c4.metric("Total Amount", f"₹{d_kpis['Total PO Amount']:,.2f}")
         
         st.dataframe(filtered_df, use_container_width=True)
+
+        st.markdown("---")
+        st.subheader("📥 Download Date-Wise PDF Report")
+        date_pdf_bytes = generate_exact_screen_pdf(
+            f"{selected_sheet} - {selected_date_str}",
+            d_kpis,
+            {},
+            {f"Orders for Date {selected_date_str}": filtered_df[['PO NO', 'DO NO', 'PARTY NAME', 'SELLER NAME', 'ITEM', 'PO QTY (MT)', 'DISP.QTY', 'PENDING', 'STATUS']]}
+        )
+        st.download_button(
+            f"📥 Download Report for {selected_date_str}",
+            data=date_pdf_bytes,
+            file_name=f"Report_{selected_sheet}_{selected_date_str.replace('/', '-')}.pdf",
+            mime="application/pdf"
+        )
 
     else:
         st.subheader("Compare Performance")
@@ -599,7 +607,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
 
     st.markdown("---")
     
-    # ---------------- 4. DETAILED ITEM, THICKNESS & WIDTH TABLE ----------------
+    # ---------------- 4. DETAILED MULTI-FILTER ITEM, THICKNESS & WIDTH TABLE ----------------
     st.subheader("4. Detailed Item, Thickness & Width Summary")
     
     item_spec_grp = df.groupby(['ITEM', 'THICKNESS_MM', 'WIDTH_MM']).agg(
@@ -619,13 +627,25 @@ elif section == "📊 All Sales & Dispatch Analytics":
         'PendingQty': 'Pending Qty (MT)'
     }, inplace=True)
 
-    items_list = ["All Items"] + sorted(item_spec_grp['Item Name'].unique().tolist())
-    selected_item_filter = st.selectbox("Filter Table by Item Name", items_list)
+    # Multi-select filters
+    col_f1, col_f2, col_f3 = st.columns(3)
+    with col_f1:
+        all_items_list = sorted(item_spec_grp['Item Name'].unique().tolist())
+        selected_items = st.multiselect("Filter Item Name(s)", all_items_list, default=[])
+    with col_f2:
+        all_thickness_list = sorted(item_spec_grp['Thickness (mm)'].unique().tolist(), key=lambda x: str(x))
+        selected_thicknesses = st.multiselect("Filter Thickness (mm)", all_thickness_list, default=[])
+    with col_f3:
+        all_width_list = sorted(item_spec_grp['Width (mm)'].unique().tolist(), key=lambda x: str(x))
+        selected_widths = st.multiselect("Filter Width (mm)", all_width_list, default=[])
 
-    if selected_item_filter != "All Items":
-        display_spec_table = item_spec_grp[item_spec_grp['Item Name'] == selected_item_filter]
-    else:
-        display_spec_table = item_spec_grp
+    display_spec_table = item_spec_grp.copy()
+    if selected_items:
+        display_spec_table = display_spec_table[display_spec_table['Item Name'].isin(selected_items)]
+    if selected_thicknesses:
+        display_spec_table = display_spec_table[display_spec_table['Thickness (mm)'].isin(selected_thicknesses)]
+    if selected_widths:
+        display_spec_table = display_spec_table[display_spec_table['Width (mm)'].isin(selected_widths)]
 
     st.dataframe(display_spec_table, use_container_width=True)
 
@@ -654,7 +674,7 @@ elif section == "📊 All Sales & Dispatch Analytics":
         "Cancelled Orders per Sales Person": sp_cancelled,
         "Pending Orders per Sales Person": sp_pending,
         "Party Wise Summary": party_grp,
-        "Detailed Item, Thickness & Width Summary": display_spec_table
+        "Filtered Item, Thickness & Width Summary": display_spec_table
     }
     
     pdf_bytes = generate_exact_screen_pdf(selected_sheet, kpis, chart_bufs, tables_to_pdf)
