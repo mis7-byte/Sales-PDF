@@ -64,8 +64,10 @@ def parse_size(size_val):
     return None, None
 
 def safe_convert_date(series):
+    """Converts mixed date formats and timezones cleanly to naive datetime objects."""
     clean_series = series.astype(str).str.strip()
-    parsed_dates = pd.to_datetime(clean_series, errors='coerce', dayfirst=True, format='mixed')
+    parsed_dates = pd.to_datetime(clean_series, errors='coerce', dayfirst=True, utc=True)
+    parsed_dates = parsed_dates.dt.tz_localize(None)
     years = parsed_dates.dt.year
     valid_mask = (years >= 2020) & (years <= 2035)
     valid_mask = valid_mask.fillna(False)
@@ -77,7 +79,10 @@ def clean_numeric(series):
     return pd.to_numeric(clean_s, errors='coerce').fillna(0)
 
 def locate_header_and_read(excel_file, sheet_name):
-    """Dynamic header row finder to handle title banners in Excel sheets."""
+    """
+    Locates row containing table header and enforces Column 0 as S_NO 
+    even when Excel headers contain timestamps like 16:02, 15:35, etc.
+    """
     df_raw = excel_file.parse(sheet_name, header=None).dropna(how='all')
     header_row_idx = None
     
@@ -90,7 +95,17 @@ def locate_header_and_read(excel_file, sheet_name):
     if header_row_idx is not None:
         headers = df_raw.loc[header_row_idx].values
         df_data = df_raw.loc[header_row_idx + 1:].copy()
-        df_data.columns = [str(h).strip().upper() if pd.notna(h) else f"UNNAMED_{i}" for i, h in enumerate(headers)]
+        
+        # Positional header fallback: First column in table is ALWAYS S_NO
+        headers_list = []
+        for i, h in enumerate(headers):
+            h_str = str(h).strip().upper() if pd.notna(h) else ''
+            if i == 0:
+                headers_list.append('S_NO')
+            else:
+                headers_list.append(h_str if h_str else f"UNNAMED_{i}")
+                
+        df_data.columns = headers_list
         return df_data
     return pd.DataFrame()
 
@@ -113,12 +128,12 @@ def clean_data(df):
         df[col] = clean_numeric(df[col])
 
     text_cols = [
-        'PARTY_NAME', 'BROKER', 'SECTOR', 'PLACE', 'SELLER_NAME', 
+        'S_NO', 'PARTY_NAME', 'BROKER', 'SECTOR', 'PLACE', 'SELLER_NAME', 
         'ITEM', 'GRADE', 'STATUS', 'PO_NO', 'DO_NO', 'PAYMENT_TERMS', 
         'DISPATCH_THROUGH', 'REMARK', 'MOBILE_NO'
     ]
     for col in text_cols:
-        df[col] = df[col].astype(str).replace(['nan', 'None', 'NAT', 'N/A', ''], 'Unknown').str.strip()
+        df[col] = df[col].astype(str).replace(['nan', 'None', 'NAT', 'N/A', ''], '').str.strip()
 
     df['TOTAL_REVENUE'] = df['PO_QTY'] * df['PER_TON']
     sizes = df['SIZE'].apply(parse_size)
@@ -250,7 +265,7 @@ if uploaded_file is not None:
         st.sidebar.divider()
         st.sidebar.header("⚙️ Report & Controls")
 
-        # Sidebar Switches & Checkboxes
+        # Sidebar Controls
         chk_compare_dates = st.sidebar.checkbox("Compare Data Between Dates", value=False)
         chk_view_pending = st.sidebar.checkbox("View Pending Dispatch Sheet", value=False)
         chk_overall_comparison = st.sidebar.checkbox("Overall Comparison Analytics", value=False)
